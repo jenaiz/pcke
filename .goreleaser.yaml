@@ -1,0 +1,72 @@
+# goreleaser config — Phase −1 bootstrap.
+# See PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md §3.1 B8, §13.
+# Targets: darwin/linux × amd64/arm64.
+# Windows is built in CI as a smoke test (Plan §13.1) but NOT shipped here
+# until Phase 2. A separate validation track for Windows is filed as a TODO
+# in the README.
+#
+# Compatible with goreleaser v2.
+
+version: 2
+
+project_name: pcke
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pcke
+    main: ./cmd/pcke
+    binary: pcke
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: pcke
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
+      - '^test:'
+
+# Cosign keyless signing of checksums + binaries (B9).
+# Active when running inside GitHub Actions with OIDC.
+# Locally (snapshot), the signs section is skipped automatically because
+# COSIGN_EXPERIMENTAL is unset and signing requires the OIDC issuer.
+signs:
+  - id: cosign
+    cmd: cosign
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+    artifacts: checksum
+    output: true

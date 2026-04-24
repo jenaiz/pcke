@@ -1,0 +1,167 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.23.x"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.11.4
+          args: --timeout=5m
+
+  test:
+    name: test (${{ matrix.os }}/${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+            runner: ubuntu-latest
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            runner: ubuntu-22.04-arm
+          - os: macos-13
+            arch: amd64
+            runner: macos-13
+          - os: macos-14
+            arch: arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: test
+        run: go test -count=1 -coverprofile=cover.out -covermode=atomic ./...
+      - name: upload coverage
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: cover.out
+          if-no-files-found: error
+
+  test-race:
+    name: test -race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: test -race
+        run: go test -race -count=1 ./...
+
+  fuzz-short:
+    name: fuzz (5 min)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: fuzz
+        env:
+          FUZZTIME: 5m
+        run: |
+          # Phase −1 has no fuzz targets yet. The job exits 0 if there is
+          # nothing to do; once Phase 0 lands the Makefile target loops over
+          # all Fuzz* functions.
+          set -euo pipefail
+          targets=$(go test -list '^Fuzz' ./... 2>/dev/null | grep -E '^Fuzz' || true)
+          if [ -z "$targets" ]; then
+            echo "no fuzz targets yet — skipping"
+            exit 0
+          fi
+          make fuzz FUZZTIME=$FUZZTIME
+
+  bench-gate:
+    name: bench-gate (>=10% regression on BenchmarkCritical*)
+    runs-on: ubuntu-latest
+    if: false # Activated in Phase 1 once benchmarks exist (Plan §7.4).
+    steps:
+      - run: echo "bench-gate disabled until Phase 1"
+
+  build:
+    name: build (${{ matrix.os }}/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+          - os: macos-14
+            goos: darwin
+            goarch: arm64
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p bin
+          go build -trimpath -ldflags "-s -w -X main.version=ci" -o bin/pcke${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/pcke
+
+  coverage:
+    name: coverage gate
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
+          path: .
+      - name: report
+        run: |
+          set -euo pipefail
+          # Compute total coverage. The hard −2 pp gate vs main baseline lands
+          # in Phase 0 once we have a meaningful baseline to diff against
+          # (Plan §7.4). For Phase −1 this job is informational.
+          total=$(go tool cover -func=cover.out | awk '/^total:/ {print $3}')
+          echo "total coverage: $total"
+        shell: bash
