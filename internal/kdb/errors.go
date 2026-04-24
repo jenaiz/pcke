@@ -8,9 +8,6 @@ import "errors"
 
 // Sentinel errors for kdb operations.
 var (
-	// ErrChecksumMismatch indicates a CRC32C verification failed on a page.
-	ErrChecksumMismatch = errors.New("kdb: page checksum mismatch")
-
 	// ErrInvalidConfig indicates the configuration is invalid.
 	ErrInvalidConfig = errors.New("kdb: invalid configuration")
 
