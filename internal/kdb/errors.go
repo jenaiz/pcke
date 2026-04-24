@@ -8,12 +8,12 @@ import "errors"
 
 // Sentinel errors for kdb operations.
 var (
-	// ErrDBLocked indicates another process holds the exclusive file lock.
-	ErrDBLocked = errors.New("kdb: database is locked by another process")
-
 	// ErrChecksumMismatch indicates a CRC32C verification failed on a page.
 	ErrChecksumMismatch = errors.New("kdb: page checksum mismatch")
 
 	// ErrInvalidConfig indicates the configuration is invalid.
 	ErrInvalidConfig = errors.New("kdb: invalid configuration")
+
+	// ErrDBClosed indicates the database has already been closed.
+	ErrDBClosed = errors.New("kdb: database is closed")
 )

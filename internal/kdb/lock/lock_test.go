@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/lock"
 )
 
@@ -59,7 +58,7 @@ func TestDoubleAcquireReturnsErrDBLocked(t *testing.T) {
 		t.Fatal("second Acquire succeeded, want ErrDBLocked")
 	}
 
-	if !errors.Is(err, kdb.ErrDBLocked) {
+	if !errors.Is(err, lock.ErrDBLocked) {
 		t.Errorf("error = %v, want ErrDBLocked", err)
 	}
 }

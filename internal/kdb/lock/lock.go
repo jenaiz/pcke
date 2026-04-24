@@ -9,13 +9,15 @@
 package lock
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/jenaiz/pcke/internal/kdb"
 )
+
+// ErrDBLocked indicates another process holds the exclusive file lock.
+var ErrDBLocked = errors.New("kdb: database is locked by another process")
 
 // FileLock represents an exclusive file lock backed by the OS flock mechanism.
 type FileLock struct {
@@ -84,7 +86,7 @@ func OwnerPID(path string) int {
 func wrapLocked(path string) error {
 	pid := OwnerPID(path)
 	if pid > 0 {
-		return fmt.Errorf("lock: held by PID %d: %w", pid, kdb.ErrDBLocked)
+		return fmt.Errorf("lock: held by PID %d: %w", pid, ErrDBLocked)
 	}
-	return fmt.Errorf("lock: %w", kdb.ErrDBLocked)
+	return fmt.Errorf("lock: %w", ErrDBLocked)
 }
