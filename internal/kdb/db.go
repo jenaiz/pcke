@@ -215,5 +215,10 @@ func (db *DB) initIfEmpty() error {
 		return fmt.Errorf("kdb: sync after init: %w", err)
 	}
 
+	// Write initial meta pages (both slots, generation 1).
+	if err := initMeta(db.file, GrowthChunk); err != nil {
+		return fmt.Errorf("kdb: init meta: %w", err)
+	}
+
 	return nil
 }

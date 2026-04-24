@@ -18,11 +18,14 @@
 package page
 
 import (
+	"errors"
 	"fmt"
 
-	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/encoding"
 )
+
+// ErrChecksumMismatch indicates a CRC32C verification failed on a page.
+var ErrChecksumMismatch = errors.New("kdb: page checksum mismatch")
 
 const (
 	// Size is the fixed page size in bytes.
@@ -144,7 +147,7 @@ func Verify(buf []byte) error {
 
 	// Check magic.
 	if m := encoding.Uint32(buf[offMagic:]); m != Magic {
-		return fmt.Errorf("page: bad magic 0x%08X, want 0x%08X: %w", m, Magic, kdb.ErrChecksumMismatch)
+		return fmt.Errorf("page: bad magic 0x%08X, want 0x%08X: %w", m, Magic, ErrChecksumMismatch)
 	}
 
 	// Verify checksum.
@@ -154,7 +157,7 @@ func Verify(buf []byte) error {
 	if stored != computed {
 		return fmt.Errorf(
 			"page: checksum mismatch: stored 0x%08X, computed 0x%08X: %w",
-			stored, computed, kdb.ErrChecksumMismatch,
+			stored, computed, ErrChecksumMismatch,
 		)
 	}
 
