@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/encoding"
 	"github.com/jenaiz/pcke/internal/kdb/page"
 )
@@ -111,7 +110,7 @@ func TestVerifyBadMagic(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for bad magic, got nil")
 	}
-	if !errors.Is(err, kdb.ErrChecksumMismatch) {
+	if !errors.Is(err, page.ErrChecksumMismatch) {
 		t.Errorf("expected ErrChecksumMismatch, got %v", err)
 	}
 }
