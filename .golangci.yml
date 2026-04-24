@@ -9,12 +9,8 @@ run:
   tests: true
   modules-download-mode: readonly
 
-output:
-  print-issued-lines: true
-  sort-results: true
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - gosec
@@ -24,59 +20,47 @@ linters:
     - unused
     - gocyclo
     - ineffassign
+  settings:
+    gocyclo:
+      min-complexity: 15
+    gosec:
+      excludes:
+        # G104 — error not checked. Covered by errcheck with better localisation.
+        - G104
+    revive:
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    staticcheck:
+      checks: ["all"]
 
 formatters:
   enable:
     - gofumpt
 
-linters-settings:
-  gocyclo:
-    min-complexity: 15
-  gosec:
-    excludes:
-      # G104 — error not checked. Covered by errcheck with better localisation.
-      - G104
-  revive:
-    severity: warning
-    rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: if-return
-      - name: increment-decrement
-      - name: var-naming
-      - name: var-declaration
-      - name: package-comments
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unused-parameter
-      - name: unreachable-code
-      - name: redefines-builtin-id
-  staticcheck:
-    checks: ["all"]
-
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-use-default: false
-  exclude-rules:
-    # Test files: relax cyclomatic complexity and gosec subtests.
-    - path: _test\.go
-      linters:
-        - gocyclo
-        - gosec
-    # Generated or vendored files (none yet, future-proof).
-    - path: \.pb\.go
-      linters:
-        - all
