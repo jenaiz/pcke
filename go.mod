@@ -1,4 +1,4 @@
-module github.com/jesusnavarrete/pcke
+module github.com/jenaiz/pcke
 
 go 1.23
 

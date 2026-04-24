@@ -8,7 +8,7 @@
 ## Quick start
 
 ```bash
-git clone https://github.com/jesusnavarrete/pcke.git
+git clone https://github.com/jenaiz/pcke.git
 cd pcke
 make install-hooks   # opt-in: pre-commit lint + test-short
 make verify          # lint + test + build
