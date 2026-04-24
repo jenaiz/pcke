@@ -1,0 +1,133 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
+
+func newInitCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "init",
+		Short: "Initialise pcke in the current repository",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke init: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newScanCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "scan",
+		Short: "Scan the repository and update the knowledge base",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke scan: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newSyncCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync",
+		Short: "Generate output files (.context/, copilot-instructions, etc.)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke sync: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newRuleCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rule",
+		Short: "Manage project rules",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke rule: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newNoteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "note",
+		Short: "Manage project notes",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke note: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show knowledge base status",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke status: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newModulesCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "modules",
+		Short: "List detected modules",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke modules: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newDiagnosticsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "diagnostics",
+		Short: "Show database diagnostics",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			fmt.Println("pcke diagnostics: not yet implemented (Phase 0)")
+			return nil
+		},
+	}
+}
+
+func newConfigCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "View and manage configuration",
+	}
+
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "get [key]",
+			Short: "Get a configuration value",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(_ *cobra.Command, _ []string) error {
+				fmt.Println("pcke config get: not yet implemented (Phase 0)")
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "set [key] [value]",
+			Short: "Set a configuration value",
+			Args:  cobra.ExactArgs(2),
+			RunE: func(_ *cobra.Command, _ []string) error {
+				fmt.Println("pcke config set: not yet implemented (Phase 0)")
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "list",
+			Short: "List all configuration values",
+			RunE: func(_ *cobra.Command, _ []string) error {
+				fmt.Println("pcke config list: not yet implemented (Phase 0)")
+				return nil
+			},
+		},
+	)
+
+	return cmd
+}
