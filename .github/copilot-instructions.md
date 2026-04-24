@@ -20,5 +20,5 @@ handle is **jenaiz**.
 
 - Go 1.23+ stdlib only in Phase −1 (no external deps yet).
 - Conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `chore:`.
-- Lint config: `.golangci.yml` (9 linters, gocyclo ≤ 15).
+- Lint config: `.golangci.yml` **v2 format** (8 linters + gofumpt formatter, gocyclo ≤ 15).
 - Build tags: `kdbdebug` for assertions/crash hooks (never in releases).
