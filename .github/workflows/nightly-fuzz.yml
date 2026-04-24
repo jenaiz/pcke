@@ -1,0 +1,40 @@
+name: nightly-fuzz
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-long:
+    name: fuzz (60 min per target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache: true
+      - name: fuzz
+        env:
+          FUZZTIME: 60m
+        run: |
+          set -euo pipefail
+          targets=$(go test -list '^Fuzz' ./... 2>/dev/null | grep -E '^Fuzz' || true)
+          if [ -z "$targets" ]; then
+            echo "no fuzz targets yet — exiting clean"
+            exit 0
+          fi
+          make fuzz FUZZTIME=$FUZZTIME
+      - name: upload corpus on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: |
+            **/testdata/fuzz/**
+          if-no-files-found: warn
