@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — Phase −1 bootstrap (Plan §3.1 B13).
+# Runs lint + quick tests before each commit.
+# Install: make install-hooks
+
+set -euo pipefail
+
+echo "pre-commit: running make lint..."
+make lint
+
+echo "pre-commit: running make test-short..."
+make test-short
+
+echo "pre-commit: all checks passed."
