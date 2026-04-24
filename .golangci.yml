@@ -1,6 +1,8 @@
 # golangci-lint config — Phase −1 bootstrap.
 # See PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md §3.1 B3 + §7.1.
-# Configured for golangci-lint v1.59+.
+# Configured for golangci-lint v2.x.
+
+version: "2"
 
 run:
   timeout: 5m
@@ -20,9 +22,12 @@ linters:
     - staticcheck
     - revive
     - unused
-    - gofumpt
     - gocyclo
     - ineffassign
+
+formatters:
+  enable:
+    - gofumpt
 
 linters-settings:
   gocyclo:
