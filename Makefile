@@ -127,8 +127,8 @@ verify-phase-4: ## Run Phase 4 DoD (not implemented yet)
 # Release
 # ---------------------------------------------------------------------------
 .PHONY: release-dryrun
-release-dryrun: ## goreleaser snapshot (no publish)
-	goreleaser release --snapshot --clean
+release-dryrun: ## goreleaser snapshot (no publish, no sign)
+	goreleaser release --snapshot --clean --skip=sign
 
 # ---------------------------------------------------------------------------
 # Hooks
