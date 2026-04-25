@@ -1,13 +1,18 @@
 package kdb_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/page"
+	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
 
 // testDir creates a temporary directory for a test and returns its path.
@@ -293,5 +298,262 @@ func TestPageCountAfterMultipleGrows(t *testing.T) {
 	want := int64((1 + grows) * kdb.GrowthChunk)
 	if count != want {
 		t.Errorf("PageCount = %d, want %d", count, want)
+	}
+}
+
+// ── Transaction API integration tests (T10) ──
+
+func TestUpdatePutViewGet(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// Write via Update.
+	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("hello"), []byte("world"))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Read via View.
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
+		val, err := rtx.Get([]byte("hello"))
+		if err != nil {
+			return err
+		}
+		if string(val) != "world" {
+			t.Errorf("Get = %q, want %q", val, "world")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+}
+
+func TestUpdateMultipleKeys(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// Insert 10 keys in a single transaction.
+	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+		for i := range 10 {
+			key := []byte(fmt.Sprintf("key-%03d", i))
+			val := []byte(fmt.Sprintf("val-%03d", i))
+			if err := wtx.Put(key, val); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Verify all keys.
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
+		for i := range 10 {
+			key := []byte(fmt.Sprintf("key-%03d", i))
+			val, err := rtx.Get(key)
+			if err != nil {
+				return fmt.Errorf("Get(%s): %w", key, err)
+			}
+			want := fmt.Sprintf("val-%03d", i)
+			if string(val) != want {
+				t.Errorf("Get(%s) = %q, want %q", key, val, want)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+}
+
+func TestUpdateDelete(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// Insert.
+	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("del-key"), []byte("bye"))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Delete.
+	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Delete([]byte("del-key"))
+	}); err != nil {
+		t.Fatalf("Update delete: %v", err)
+	}
+
+	// Verify deleted.
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
+		_, err := rtx.Get([]byte("del-key"))
+		if err == nil {
+			t.Error("expected error for deleted key")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+}
+
+func TestUpdateRollbackOnError(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	sentinel := errors.New("abort")
+
+	// Failing transaction.
+	err = db.Update(ctx, func(wtx *tx.WriteTx) error {
+		if err := wtx.Put([]byte("ephemeral"), []byte("value")); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Update error: got %v, want %v", err, sentinel)
+	}
+
+	// Subsequent update should succeed (writer lock released).
+	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("real"), []byte("data"))
+	}); err != nil {
+		t.Fatalf("Update after rollback: %v", err)
+	}
+}
+
+func TestViewOnClosedDB(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = db.Close()
+
+	ctx := context.Background()
+	err = db.View(ctx, func(_ *tx.ReadTx) error { return nil })
+	if !errors.Is(err, kdb.ErrDBClosed) {
+		t.Errorf("View on closed DB: got %v, want ErrDBClosed", err)
+	}
+}
+
+func TestUpdateOnClosedDB(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = db.Close()
+
+	ctx := context.Background()
+	err = db.Update(ctx, func(_ *tx.WriteTx) error { return nil })
+	if !errors.Is(err, kdb.ErrDBClosed) {
+		t.Errorf("Update on closed DB: got %v, want ErrDBClosed", err)
+	}
+}
+
+func TestConcurrentViews(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// Insert seed data.
+	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("shared"), []byte("value"))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Run 10 concurrent Views.
+	var wg sync.WaitGroup
+	errs := make([]error, 10)
+	for i := range 10 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = db.View(ctx, func(rtx *tx.ReadTx) error {
+				val, err := rtx.Get([]byte("shared"))
+				if err != nil {
+					return err
+				}
+				if string(val) != "value" {
+					return fmt.Errorf("got %q", val)
+				}
+				return nil
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("View[%d]: %v", i, err)
+		}
+	}
+}
+
+func TestPersistAcrossReopen(t *testing.T) {
+	dir := testDir(t)
+	ctx := context.Background()
+
+	// Write data and close.
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("persist"), []byte("ok"))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen and read.
+	db2, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	if err := db2.View(ctx, func(rtx *tx.ReadTx) error {
+		val, err := rtx.Get([]byte("persist"))
+		if err != nil {
+			return err
+		}
+		if string(val) != "ok" {
+			t.Errorf("Get = %q, want %q", val, "ok")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
 	}
 }

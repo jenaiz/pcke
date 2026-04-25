@@ -1,9 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/jenaiz/pcke/internal/analysis"
+	"github.com/jenaiz/pcke/internal/config"
+	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/output"
 )
 
 func newInitCmd() *cobra.Command {
@@ -18,14 +25,44 @@ func newInitCmd() *cobra.Command {
 }
 
 func newScanCmd() *cobra.Command {
-	return &cobra.Command{
+	var full bool
+
+	cmd := &cobra.Command{
 		Use:   "scan",
 		Short: "Scan the repository and update the knowledge base",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke scan: not yet implemented (Phase 0)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("scan: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("scan: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			cfg := config.Defaults().Scan
+			scanner, err := analysis.NewScanner(cwd, db, cfg)
+			if err != nil {
+				return fmt.Errorf("scan: init scanner: %w", err)
+			}
+
+			result, err := scanner.Scan(context.Background(), full)
+			if err != nil {
+				return fmt.Errorf("scan: %w", err)
+			}
+
+			fmt.Printf("scan complete: %d created, %d updated, %d deleted (%d files in %s)\n",
+				result.NodesCreated, result.NodesUpdated, result.NodesDeleted,
+				result.FilesScanned, result.Duration.Round(1e6))
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&full, "full", false, "Force a full scan (rebuild all nodes)")
+
+	return cmd
 }
 
 func newSyncCmd() *cobra.Command {
@@ -33,7 +70,24 @@ func newSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Generate output files (.context/, copilot-instructions, etc.)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke sync: not yet implemented (Phase 0)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("sync: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("sync: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			renderer := output.NewRenderer(cwd, db)
+			result, err := renderer.Sync(context.Background())
+			if err != nil {
+				return fmt.Errorf("sync: %w", err)
+			}
+
+			fmt.Printf("sync complete: %d files written\n", result.FilesWritten)
 			return nil
 		},
 	}
@@ -84,14 +138,46 @@ func newModulesCmd() *cobra.Command {
 }
 
 func newDiagnosticsCmd() *cobra.Command {
-	return &cobra.Command{
+	var format string
+
+	cmd := &cobra.Command{
 		Use:   "diagnostics",
 		Short: "Show database diagnostics",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke diagnostics: not yet implemented (Phase 0)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("diagnostics: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("diagnostics: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			stats, err := db.Stats()
+			if err != nil {
+				return fmt.Errorf("diagnostics: gather stats: %w", err)
+			}
+
+			switch format {
+			case "json":
+				data, err := stats.JSON()
+				if err != nil {
+					return fmt.Errorf("diagnostics: marshal JSON: %w", err)
+				}
+				fmt.Println(string(data))
+			default:
+				fmt.Print(stats.Human())
+			}
+
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&format, "format", "text", "Output format: text or json")
+
+	return cmd
 }
 
 func newConfigCmd() *cobra.Command {

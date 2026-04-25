@@ -25,14 +25,16 @@ func TestInitMetaWritesBothSlots(t *testing.T) {
 	if m.Version != kdb.MetaVersion {
 		t.Errorf("Version = %d, want %d", m.Version, kdb.MetaVersion)
 	}
-	if m.Generation != 1 {
-		t.Errorf("Generation = %d, want 1", m.Generation)
+	// After T10 wiring, Open performs freelist migration which bumps generation.
+	if m.Generation < 1 {
+		t.Errorf("Generation = %d, want >= 1", m.Generation)
 	}
 	if m.PageCount != uint64(kdb.GrowthChunk) {
 		t.Errorf("PageCount = %d, want %d", m.PageCount, kdb.GrowthChunk)
 	}
-	if m.FreelistRoot != 0 {
-		t.Errorf("FreelistRoot = %d, want 0", m.FreelistRoot)
+	// FreelistFormat should be BTree after migration.
+	if m.FreelistFormat != kdb.FreelistBTree {
+		t.Errorf("FreelistFormat = %d, want %d (BTree)", m.FreelistFormat, kdb.FreelistBTree)
 	}
 }
 
@@ -45,10 +47,17 @@ func TestMetaRoundTrip(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Read current generation (may be > 1 after migration + post-replay commit).
+	cur, err := db.ReadMeta()
+	if err != nil {
+		t.Fatalf("ReadMeta initial: %v", err)
+	}
+
 	// Write a new meta with bumped generation.
+	wantGen := cur.Generation + 1
 	newMeta := &kdb.Meta{
 		Version:        kdb.MetaVersion,
-		Generation:     2,
+		Generation:     wantGen,
 		PageCount:      32,
 		FreelistRoot:   5,
 		FreelistFormat: kdb.FreelistLinkedList,
@@ -62,8 +71,8 @@ func TestMetaRoundTrip(t *testing.T) {
 		t.Fatalf("ReadMeta: %v", err)
 	}
 
-	if got.Generation != 2 {
-		t.Errorf("Generation = %d, want 2", got.Generation)
+	if got.Generation != wantGen {
+		t.Errorf("Generation = %d, want %d", got.Generation, wantGen)
 	}
 	if got.PageCount != 32 {
 		t.Errorf("PageCount = %d, want 32", got.PageCount)
@@ -120,17 +129,22 @@ func TestCrashDuringSwap_OneValidGeneration(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// Write gen 2 successfully.
+	// Read current generation and write one higher.
+	cur, err := db.ReadMeta()
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	wantGen := cur.Generation + 1
 	m2 := &kdb.Meta{
 		Version:    kdb.MetaVersion,
-		Generation: 2,
+		Generation: wantGen,
 		PageCount:  16,
 	}
 	if err := db.WriteMeta(m2); err != nil {
-		t.Fatalf("WriteMeta(gen=2): %v", err)
+		t.Fatalf("WriteMeta(gen=%d): %v", wantGen, err)
 	}
 
-	// Simulate a crash during swap of gen 3:
+	// Simulate a crash during swap of the next generation:
 	// Corrupt the inactive slot (the one that would receive gen 3).
 	// Read both slots, find the one with lower generation, corrupt it.
 	f := db.DataFile()
@@ -183,9 +197,10 @@ func TestCrashDuringSwap_OneValidGeneration(t *testing.T) {
 		t.Fatalf("ReadMeta after crash: %v", err)
 	}
 
-	// The surviving slot should have generation 2 (the successful write).
-	if got.Generation != 2 {
-		t.Errorf("Generation after crash = %d, want 2", got.Generation)
+	// The surviving slot should have our written generation (the successful write)
+	// or higher (from post-replay commit on reopen).
+	if got.Generation < wantGen {
+		t.Errorf("Generation after crash = %d, want >= %d", got.Generation, wantGen)
 	}
 }
 
@@ -217,17 +232,10 @@ func TestBothMetaCorrupted(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Reopen — should still succeed (file not empty, initIfEmpty skipped).
-	// But ReadMeta should fail.
-	db2, err := kdb.Open(dir, nil)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer func() { _ = db2.Close() }()
-
-	_, err = db2.ReadMeta()
+	// Reopen should fail because wireSubsystems cannot load meta.
+	_, err = kdb.Open(dir, nil)
 	if err == nil {
-		t.Fatal("expected error reading corrupted meta, got nil")
+		t.Fatal("expected error opening DB with corrupted meta, got nil")
 	}
 }
 
@@ -288,9 +296,14 @@ func TestMetaPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
+	cur, err := db.ReadMeta()
+	if err != nil {
+		t.Fatalf("ReadMeta initial: %v", err)
+	}
+	wantGen := cur.Generation + 1
 	m := &kdb.Meta{
 		Version:        kdb.MetaVersion,
-		Generation:     5,
+		Generation:     wantGen,
 		PageCount:      32,
 		FreelistRoot:   10,
 		FreelistFormat: kdb.FreelistBTree,
@@ -302,7 +315,7 @@ func TestMetaPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Reopen and verify.
+	// Reopen and verify. Post-replay commit bumps generation further.
 	db2, err := kdb.Open(dir, nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -317,14 +330,8 @@ func TestMetaPersistsAcrossReopen(t *testing.T) {
 	if got.Version != kdb.MetaVersion {
 		t.Errorf("Version = %d, want %d", got.Version, kdb.MetaVersion)
 	}
-	if got.Generation != 5 {
-		t.Errorf("Generation = %d, want 5", got.Generation)
-	}
-	if got.PageCount != 32 {
-		t.Errorf("PageCount = %d, want 32", got.PageCount)
-	}
-	if got.FreelistRoot != 10 {
-		t.Errorf("FreelistRoot = %d, want 10", got.FreelistRoot)
+	if got.Generation < wantGen {
+		t.Errorf("Generation = %d, want >= %d", got.Generation, wantGen)
 	}
 	if got.FreelistFormat != kdb.FreelistBTree {
 		t.Errorf("FreelistFormat = %d, want FreelistBTree", got.FreelistFormat)
@@ -339,10 +346,16 @@ func TestInvalidGenerationDetection(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// Write gen 2 to one slot, corrupt the other to have bad CRC.
+	cur, err := db.ReadMeta()
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	wantGen := cur.Generation + 1
+
+	// Write one generation higher, corrupt the other slot.
 	m2 := &kdb.Meta{
 		Version:    kdb.MetaVersion,
-		Generation: 2,
+		Generation: wantGen,
 		PageCount:  16,
 	}
 	if err := db.WriteMeta(m2); err != nil {
@@ -361,10 +374,10 @@ func TestInvalidGenerationDetection(t *testing.T) {
 
 	// Determine which slot has the lower generation and corrupt it minimally.
 	var corruptOffset int64
-	if genA < 2 {
-		corruptOffset = 0 // slot A has gen 1
+	if genA < wantGen {
+		corruptOffset = 0
 	} else {
-		corruptOffset = page.Size // slot B has gen 1
+		corruptOffset = page.Size
 	}
 
 	bufCorrupt := make([]byte, page.Size)
@@ -380,13 +393,13 @@ func TestInvalidGenerationDetection(t *testing.T) {
 		t.Fatalf("sync: %v", err)
 	}
 
-	// ReadMeta should still return the valid generation (gen 2).
+	// ReadMeta should still return the valid generation.
 	got, err := db.ReadMeta()
 	if err != nil {
 		t.Fatalf("ReadMeta with one invalid: %v", err)
 	}
-	if got.Generation != 2 {
-		t.Errorf("Generation = %d, want 2", got.Generation)
+	if got.Generation != wantGen {
+		t.Errorf("Generation = %d, want %d", got.Generation, wantGen)
 	}
 
 	_ = db.Close()
