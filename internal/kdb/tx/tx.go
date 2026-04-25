@@ -48,6 +48,12 @@ func (tx *ReadTx) Get(key []byte) ([]byte, error) {
 	return tx.tree.Get(key)
 }
 
+// Cursor returns a [btree.Cursor] for iterating over the B+tree.
+// The caller must not use the cursor after the transaction is closed.
+func (tx *ReadTx) Cursor() *btree.Cursor {
+	return tx.tree.Cursor()
+}
+
 // Close marks the transaction as closed. Idempotent.
 func (tx *ReadTx) Close() {
 	tx.closed = true

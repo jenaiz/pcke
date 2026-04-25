@@ -10,6 +10,7 @@ import (
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/output"
 )
 
 func newInitCmd() *cobra.Command {
@@ -69,7 +70,24 @@ func newSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Generate output files (.context/, copilot-instructions, etc.)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke sync: not yet implemented (Phase 0)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("sync: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("sync: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			renderer := output.NewRenderer(cwd, db)
+			result, err := renderer.Sync(context.Background())
+			if err != nil {
+				return fmt.Errorf("sync: %w", err)
+			}
+
+			fmt.Printf("sync complete: %d files written\n", result.FilesWritten)
 			return nil
 		},
 	}
