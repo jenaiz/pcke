@@ -204,8 +204,9 @@ func (db *DB) PageCount() (int64, error) {
 	return size / pageSize, nil
 }
 
-// Grow extends the data file by one growth chunk (16 pages = 65536 bytes).
-// The new pages are zero-filled.
+// Grow extends the data file by one growth chunk (16 pages = 65536 bytes)
+// and adds the new pages to the freelist, making them available for
+// allocation. Updates the meta page count accordingly.
 func (db *DB) Grow() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -214,7 +215,23 @@ func (db *DB) Grow() error {
 		return ErrDBClosed
 	}
 
-	return db.grow()
+	oldCount := db.meta.PageCount
+
+	if err := db.grow(); err != nil {
+		return err
+	}
+
+	newCount := oldCount + GrowthChunk
+	db.meta.PageCount = newCount
+
+	// Add new pages to the freelist.
+	for pgID := oldCount; pgID < newCount; pgID++ {
+		if err := db.fl.Free(pgID); err != nil {
+			return fmt.Errorf("kdb: grow free page %d: %w", pgID, err)
+		}
+	}
+
+	return nil
 }
 
 // grow extends the file by one chunk. Caller must hold db.mu.
