@@ -971,3 +971,197 @@ func verifyTreeContents(t *testing.T, tree *btree.Tree, keys map[string]string) 
 		}
 	}
 }
+
+// TestKeyCount verifies KeyCount returns the correct number of keys.
+func TestKeyCount(t *testing.T) {
+	tree, _, _ := testEnv(t, 2000)
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("empty tree KeyCount = %d, want 0", got)
+	}
+
+	const n = 200
+	for i := range n {
+		if err := tree.Put([]byte(fmt.Sprintf("kc-%05d", i)), []byte("v")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != n {
+		t.Errorf("KeyCount = %d, want %d", got, n)
+	}
+
+	// Delete half.
+	for i := 0; i < n; i += 2 {
+		if err := tree.Delete([]byte(fmt.Sprintf("kc-%05d", i))); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != n/2 {
+		t.Errorf("after delete KeyCount = %d, want %d", got, n/2)
+	}
+}
+
+// TestHeavySequentialDelete inserts many keys and deletes them from the start
+// to trigger leaf merge and internal node rebalancing.
+func TestHeavySequentialDelete(t *testing.T) {
+	tree, _, _ := testEnv(t, 10000)
+
+	const n = 2000
+	for i := range n {
+		k := fmt.Sprintf("hsd-%06d", i)
+		if err := tree.Put([]byte(k), []byte("v")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Delete from the start — this forces left-side merges.
+	for i := range n {
+		k := fmt.Sprintf("hsd-%06d", i)
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("after full delete KeyCount = %d, want 0", got)
+	}
+}
+
+// TestDeleteFromEndTriggersMerge inserts then deletes from the end.
+func TestDeleteFromEndTriggersMerge(t *testing.T) {
+	tree, _, _ := testEnv(t, 10000)
+
+	const n = 2000
+	for i := range n {
+		k := fmt.Sprintf("end-%06d", i)
+		if err := tree.Put([]byte(k), []byte("v")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Delete from the end.
+	for i := n - 1; i >= 0; i-- {
+		k := fmt.Sprintf("end-%06d", i)
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("after full delete KeyCount = %d, want 0", got)
+	}
+}
+
+// TestDeleteMiddleThenEnds deletes the middle portion then the edges.
+func TestDeleteMiddleThenEnds(t *testing.T) {
+	tree, _, _ := testEnv(t, 10000)
+
+	const n = 1500
+	for i := range n {
+		if err := tree.Put([]byte(fmt.Sprintf("mid-%06d", i)), []byte("v")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	depth := tree.Depth()
+	t.Logf("tree depth before deletes: %d", depth)
+
+	// Delete middle third.
+	for i := n / 3; i < 2*n/3; i++ {
+		k := fmt.Sprintf("mid-%06d", i)
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete mid %d: %v", i, err)
+		}
+	}
+
+	// Delete first third.
+	for i := range n / 3 {
+		k := fmt.Sprintf("mid-%06d", i)
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete start %d: %v", i, err)
+		}
+	}
+
+	// Delete last third.
+	for i := 2 * n / 3; i < n; i++ {
+		k := fmt.Sprintf("mid-%06d", i)
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete end %d: %v", i, err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("after full delete KeyCount = %d, want 0", got)
+	}
+}
+
+// TestAlternatingDeletePattern deletes every other key repeatedly.
+func TestAlternatingDeletePattern(t *testing.T) {
+	tree, _, _ := testEnv(t, 10000)
+
+	const n = 1000
+	keys := make([]string, n)
+	for i := range n {
+		keys[i] = fmt.Sprintf("alt-%06d", i)
+		if err := tree.Put([]byte(keys[i]), []byte("v")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+
+	// Delete every other key.
+	for i := 0; i < n; i += 2 {
+		if err := tree.Delete([]byte(keys[i])); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	// Delete remaining.
+	for i := 1; i < n; i += 2 {
+		if err := tree.Delete([]byte(keys[i])); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("after full delete KeyCount = %d, want 0", got)
+	}
+}
+
+// TestDeepTreeInternalMerge builds a deep enough tree (depth 3+) then
+// performs massive deletion to trigger internal node rebalancing.
+func TestDeepTreeInternalMerge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping deep tree test in short mode")
+	}
+
+	tree, _, _ := testEnv(t, 100_000)
+
+	// Insert 50K keys to force depth ≥ 3.
+	const n = 50_000
+	for i := range n {
+		k := fmt.Sprintf("deep-%08d", i)
+		if err := tree.Put([]byte(k), []byte("v")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	depth := tree.Depth()
+	t.Logf("tree depth after %d inserts: %d", n, depth)
+	if depth < 3 {
+		t.Logf("warning: depth %d < 3, internal merge paths may not be triggered", depth)
+	}
+
+	// Delete from the start — heavily biased to trigger merges.
+	for i := range n {
+		k := fmt.Sprintf("deep-%08d", i)
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("after full delete KeyCount = %d, want 0", got)
+	}
+}

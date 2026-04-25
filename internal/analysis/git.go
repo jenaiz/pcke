@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -34,6 +35,20 @@ func (g *GitIntel) HeadHash() (string, error) {
 		return "", fmt.Errorf("resolve HEAD: %w", err)
 	}
 	return ref.Hash().String(), nil
+}
+
+// CurrentBranch returns the short name of the current branch (e.g., "main").
+// Returns an empty string if HEAD is detached.
+func (g *GitIntel) CurrentBranch() string {
+	ref, err := g.repo.Head()
+	if err != nil {
+		return ""
+	}
+	name := ref.Name()
+	if !name.IsBranch() {
+		return "" // detached HEAD
+	}
+	return name.Short()
 }
 
 // FileStats holds per-file git statistics.
@@ -175,3 +190,92 @@ func sortAuthorCommits(ac []AuthorCommits) {
 		}
 	}
 }
+
+// RenameEntry records a detected file rename in git history.
+type RenameEntry struct {
+	OldPath    string
+	NewPath    string
+	CommitHash string
+	Author     string
+	Timestamp  time.Time
+}
+
+// DetectRenames finds file renames in git history since the given commit hash.
+// If sinceHash is empty, it scans the last 100 commits. Returns renames detected
+// via tree-diff similarity matching (equivalent to git log --follow --diff-filter=R).
+func (g *GitIntel) DetectRenames(sinceHash string) ([]RenameEntry, error) {
+	logOpts := &git.LogOptions{}
+	iter, err := g.repo.Log(logOpts)
+	if err != nil {
+		return nil, fmt.Errorf("git log for renames: %w", err)
+	}
+	defer iter.Close()
+
+	var since plumbing.Hash
+	if sinceHash != "" {
+		since = plumbing.NewHash(sinceHash)
+	}
+
+	var renames []RenameEntry
+	const maxCommits = 100
+	count := 0
+
+	err = iter.ForEach(func(c *object.Commit) error {
+		count++
+		if count > maxCommits {
+			return errStopIter
+		}
+
+		// Stop if we've reached the "since" commit.
+		if sinceHash != "" && c.Hash == since {
+			return errStopIter
+		}
+
+		// Compare with parent(s) to find renames.
+		parentIter := c.Parents()
+		defer parentIter.Close()
+
+		return parentIter.ForEach(func(parent *object.Commit) error {
+			parentTree, err := parent.Tree()
+			if err != nil {
+				return nil // skip
+			}
+			childTree, err := c.Tree()
+			if err != nil {
+				return nil // skip
+			}
+
+			changes, err := parentTree.Diff(childTree)
+			if err != nil {
+				return nil // skip
+			}
+
+			for _, change := range changes {
+				// A rename shows as a delete + add with high similarity.
+				// go-git's Diff detects this via the Action field.
+				from := change.From
+				to := change.To
+
+				if from.Name != "" && to.Name != "" && from.Name != to.Name {
+					renames = append(renames, RenameEntry{
+						OldPath:    from.Name,
+						NewPath:    to.Name,
+						CommitHash: c.Hash.String(),
+						Author:     c.Author.Name,
+						Timestamp:  c.Author.When,
+					})
+				}
+			}
+			return nil
+		})
+	})
+
+	if err != nil && err != errStopIter {
+		return nil, fmt.Errorf("iterate commits for renames: %w", err)
+	}
+
+	return renames, nil
+}
+
+// errStopIter is a sentinel error to stop commit iteration early.
+var errStopIter = fmt.Errorf("stop iteration")

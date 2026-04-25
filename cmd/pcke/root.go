@@ -44,6 +44,7 @@ func newRootCmd() *cobra.Command {
 		newDiagnosticsCmd(),
 		newConfigCmd(),
 		newRecallCmd(),
+		newCompactCmd(),
 	)
 
 	return root

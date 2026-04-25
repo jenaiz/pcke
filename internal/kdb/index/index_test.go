@@ -2,6 +2,7 @@ package index_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math/rand/v2"
 	"sort"
@@ -457,5 +458,183 @@ func TestCompositeKeyOrdering(t *testing.T) {
 		if bytes.Compare(encoded[i-1], encoded[i]) >= 0 {
 			t.Errorf("key %d >= key %d: %q >= %q", i-1, i, encoded[i-1], encoded[i])
 		}
+	}
+}
+
+// TestByFileInsertScan verifies basic by_file index operations.
+func TestByFileInsertScan(t *testing.T) {
+	db := helperDB(t)
+	pool, fl := db.TestSubsystems()
+
+	idx := index.NewByFile(pool, fl, 0)
+
+	// Insert nodes for different files.
+	files := map[string][]string{
+		"internal/kdb/db.go":   {"kn:internal/kdb/db.go"},
+		"cmd/pcke/root.go":     {"kn:cmd/pcke/root.go"},
+		"internal/kdb/meta.go": {"kn:internal/kdb/meta.go"},
+	}
+
+	for file, pks := range files {
+		for _, pk := range pks {
+			if err := idx.Insert([]byte(pk), index.FileKeys(file)); err != nil {
+				t.Fatalf("insert %s: %v", pk, err)
+			}
+		}
+	}
+
+	// Scan each file.
+	for file, expectedPKs := range files {
+		got, err := idx.Scan([]byte(file))
+		if err != nil {
+			t.Fatalf("scan %s: %v", file, err)
+		}
+		if len(got) != len(expectedPKs) {
+			t.Errorf("scan %s: got %d results, want %d", file, len(got), len(expectedPKs))
+		}
+	}
+
+	// Scan missing file.
+	got, err := idx.Scan([]byte("nonexistent.go"))
+	if err != nil {
+		t.Fatalf("scan missing: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("scan missing: got %d results, want 0", len(got))
+	}
+}
+
+// TestByTypeInsertScan verifies basic by_type index operations.
+func TestByTypeInsertScan(t *testing.T) {
+	db := helperDB(t)
+	pool, fl := db.TestSubsystems()
+
+	idx := index.NewByType(pool, fl, 0)
+
+	// Insert nodes of type "file" (Phase 0 nodes).
+	for i := 0; i < 5; i++ {
+		pk := []byte(fmt.Sprintf("kn:file-%03d.go", i))
+		if err := idx.Insert(pk, index.TypeKeys("file")); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	// Insert nodes of type "function" (Phase 2 entities).
+	for i := 0; i < 3; i++ {
+		pk := []byte(fmt.Sprintf("kn:func-%03d", i))
+		if err := idx.Insert(pk, index.TypeKeys("function")); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	// Scan "file": should find 5.
+	pks, err := idx.Scan([]byte("file"))
+	if err != nil {
+		t.Fatalf("scan file: %v", err)
+	}
+	if len(pks) != 5 {
+		t.Errorf("scan file: got %d results, want 5", len(pks))
+	}
+
+	// Scan "function": should find 3.
+	pks, err = idx.Scan([]byte("function"))
+	if err != nil {
+		t.Fatalf("scan function: %v", err)
+	}
+	if len(pks) != 3 {
+		t.Errorf("scan function: got %d results, want 3", len(pks))
+	}
+
+	// Scan "struct": should find 0.
+	pks, err = idx.Scan([]byte("struct"))
+	if err != nil {
+		t.Fatalf("scan struct: %v", err)
+	}
+	if len(pks) != 0 {
+		t.Errorf("scan struct: got %d results, want 0", len(pks))
+	}
+}
+
+// TestFileKeysEmpty verifies that FileKeys returns nil for empty path.
+func TestFileKeysEmpty(t *testing.T) {
+	if keys := index.FileKeys(""); keys != nil {
+		t.Errorf("FileKeys empty: got %v, want nil", keys)
+	}
+}
+
+// TestTypeKeysEmpty verifies that TypeKeys returns nil for empty type.
+func TestTypeKeysEmpty(t *testing.T) {
+	if keys := index.TypeKeys(""); keys != nil {
+		t.Errorf("TypeKeys empty: got %v, want nil", keys)
+	}
+}
+
+// TestIndexPersistenceThroughDB verifies that secondary index roots survive
+// a close/reopen cycle via the DB meta persistence.
+func TestIndexPersistenceThroughDB(t *testing.T) {
+	dir := t.TempDir()
+
+	indexPersistPopulate(t, dir)
+	indexPersistVerify(t, dir)
+}
+
+func indexPersistPopulate(t *testing.T, dir string) {
+	t.Helper()
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	pk := []byte("kn:internal/kdb/db.go")
+	if err := db.ModuleIndex().Insert(pk, index.ModuleKeys("internal/kdb")); err != nil {
+		t.Fatalf("insert module: %v", err)
+	}
+	if err := db.FileIndex().Insert(pk, index.FileKeys("internal/kdb/db.go")); err != nil {
+		t.Fatalf("insert file: %v", err)
+	}
+	if err := db.TypeIndex().Insert(pk, index.TypeKeys("file")); err != nil {
+		t.Fatalf("insert type: %v", err)
+	}
+
+	if err := db.Checkpoint(context.Background()); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func indexPersistVerify(t *testing.T, dir string) {
+	t.Helper()
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	pk := []byte("kn:internal/kdb/db.go")
+
+	pks, err := db.ModuleIndex().Scan([]byte("internal/kdb"))
+	if err != nil {
+		t.Fatalf("scan module: %v", err)
+	}
+	if len(pks) != 1 || string(pks[0]) != string(pk) {
+		t.Errorf("module index after reopen: got %v, want [%s]", pks, pk)
+	}
+
+	pks, err = db.FileIndex().Scan([]byte("internal/kdb/db.go"))
+	if err != nil {
+		t.Fatalf("scan file: %v", err)
+	}
+	if len(pks) != 1 || string(pks[0]) != string(pk) {
+		t.Errorf("file index after reopen: got %v, want [%s]", pks, pk)
+	}
+
+	pks, err = db.TypeIndex().Scan([]byte("file"))
+	if err != nil {
+		t.Fatalf("scan type: %v", err)
+	}
+	if len(pks) != 1 || string(pks[0]) != string(pk) {
+		t.Errorf("type index after reopen: got %v, want [%s]", pks, pk)
 	}
 }

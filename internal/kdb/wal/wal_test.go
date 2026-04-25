@@ -822,3 +822,163 @@ func FuzzWALCorruptTail(f *testing.F) {
 		}
 	})
 }
+
+// ── Truncate ──
+
+func TestTruncateResetsWAL(t *testing.T) {
+	w, _ := newTestWAL(t)
+
+	// Append some records.
+	for i := range 5 {
+		_, err := w.Append(wal.TypeInsert, []byte(fmt.Sprintf("data-%d", i)))
+		if err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	// Truncate.
+	if err := w.Truncate(); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+
+	// After truncate, replay should produce zero records.
+	count := 0
+	if err := w.Replay(func(_ wal.Record) error {
+		count++
+		return nil
+	}); err != nil {
+		t.Fatalf("Replay after truncate: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("replay after truncate: %d records, want 0", count)
+	}
+
+	// Should be able to append again.
+	_, err := w.Append(wal.TypeInsert, []byte("after-truncate"))
+	if err != nil {
+		t.Fatalf("Append after truncate: %v", err)
+	}
+}
+
+func TestTruncateOnClosedWAL(t *testing.T) {
+	w, _ := newTestWAL(t)
+	_ = w.Close()
+
+	err := w.Truncate()
+	if err == nil {
+		t.Fatal("expected error on closed WAL")
+	}
+}
+
+func TestFileSizeOnClosedWAL(t *testing.T) {
+	w, _ := newTestWAL(t)
+	_ = w.Close()
+
+	_, err := w.FileSize()
+	if err == nil {
+		t.Fatal("expected error on closed WAL FileSize")
+	}
+}
+
+func TestFileSize(t *testing.T) {
+	w, _ := newTestWAL(t)
+
+	// Should have a small initial size.
+	sz, err := w.FileSize()
+	if err != nil {
+		t.Fatalf("FileSize: %v", err)
+	}
+	if sz < 0 {
+		t.Errorf("FileSize = %d, want >= 0", sz)
+	}
+
+	// Append data and check size grows.
+	for range 10 {
+		if _, err := w.Append(wal.TypeInsert, bytes.Repeat([]byte("x"), 100)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	sz2, err := w.FileSize()
+	if err != nil {
+		t.Fatalf("FileSize after appends: %v", err)
+	}
+	if sz2 <= sz {
+		t.Errorf("FileSize did not grow: %d → %d", sz, sz2)
+	}
+}
+
+func TestTruncateAfterRotate(t *testing.T) {
+	w, _ := newTestWAL(t)
+
+	// Append, rotate, append more.
+	for range 3 {
+		if _, err := w.Append(wal.TypeInsert, []byte("before-rotate")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	if err := w.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+
+	for range 2 {
+		if _, err := w.Append(wal.TypeInsert, []byte("after-rotate")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	// Truncate should remove everything.
+	if err := w.Truncate(); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+
+	count := 0
+	if err := w.Replay(func(_ wal.Record) error {
+		count++
+		return nil
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("after truncate: %d records, want 0", count)
+	}
+}
+
+func TestNextLSNAfterReopen(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Append 5 records.
+	var lastLSN uint64
+	for range 5 {
+		lsn, err := w.Append(wal.TypeInsert, []byte("data"))
+		if err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		lastLSN = lsn
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen.
+	w2, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = w2.Close() }()
+
+	// Next LSN should be > lastLSN.
+	newLSN, err := w2.Append(wal.TypeInsert, []byte("after-reopen"))
+	if err != nil {
+		t.Fatalf("Append after reopen: %v", err)
+	}
+	if newLSN <= lastLSN {
+		t.Errorf("new LSN %d <= last LSN %d", newLSN, lastLSN)
+	}
+}

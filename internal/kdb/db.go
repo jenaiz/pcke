@@ -17,6 +17,7 @@ import (
 	"github.com/jenaiz/pcke/internal/kdb/bufpool"
 	"github.com/jenaiz/pcke/internal/kdb/diagnostics"
 	"github.com/jenaiz/pcke/internal/kdb/freelist"
+	"github.com/jenaiz/pcke/internal/kdb/index"
 	"github.com/jenaiz/pcke/internal/kdb/lock"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/kdb/wal"
@@ -57,17 +58,21 @@ type Options struct {
 
 // DB represents an open kdb database.
 type DB struct {
-	mu     sync.Mutex
-	rwmu   sync.RWMutex // serialises View (RLock) vs Update (Lock)
-	dir    string       // path to .pcke directory
-	file   *os.File
-	flock  *lock.FileLock
-	wal    *wal.WAL
-	pool   *bufpool.Pool
-	fl     *freelist.BTreeFreelist
-	tree   *btree.Tree
-	meta   *Meta
-	closed bool
+	mu      sync.Mutex
+	rwmu    sync.RWMutex // serialises View (RLock) vs Update (Lock)
+	dir     string       // path to .pcke directory
+	file    *os.File
+	flock   *lock.FileLock
+	wal     *wal.WAL
+	pool    *bufpool.Pool
+	fl      *freelist.BTreeFreelist
+	tree    *btree.Tree
+	meta    *Meta
+	closed  bool
+	modIdx  *index.SecondaryIndex // by_module secondary index
+	tagIdx  *index.SecondaryIndex // by_tag secondary index
+	fileIdx *index.SecondaryIndex // by_file secondary index
+	typeIdx *index.SecondaryIndex // by_type secondary index
 }
 
 // Open opens (or creates) a kdb database rooted at path.
@@ -160,8 +165,10 @@ func (db *DB) Close() error {
 	if err := db.file.Close(); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("kdb: close data file: %w", err)
 	}
-	if err := db.flock.Unlock(); err != nil && firstErr == nil {
-		firstErr = fmt.Errorf("kdb: unlock: %w", err)
+	if db.flock != nil {
+		if err := db.flock.Unlock(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("kdb: unlock: %w", err)
+		}
 	}
 
 	db.file = nil
@@ -170,6 +177,10 @@ func (db *DB) Close() error {
 	db.pool = nil
 	db.fl = nil
 	db.tree = nil
+	db.modIdx = nil
+	db.tagIdx = nil
+	db.fileIdx = nil
+	db.typeIdx = nil
 
 	return firstErr
 }
@@ -351,6 +362,12 @@ func (db *DB) wireSubsystems() error {
 	// the committed root from the last successful meta swap.
 	db.tree = btree.New(m.TreeRoot, db.pool, db.fl)
 
+	// Create secondary indexes from persisted roots.
+	db.modIdx = index.NewByModule(db.pool, db.fl, m.ModuleIndexRoot)
+	db.tagIdx = index.NewByTag(db.pool, db.fl, m.TagIndexRoot)
+	db.fileIdx = index.NewByFile(db.pool, db.fl, m.FileIndexRoot)
+	db.typeIdx = index.NewByType(db.pool, db.fl, m.TypeIndexRoot)
+
 	// Replay WAL to recover any in-flight transactions since the last commit.
 	if err := db.replayWAL(); err != nil {
 		_ = w.Close()
@@ -382,12 +399,16 @@ func (db *DB) postReplayCommit() error {
 	}
 
 	newMeta := &Meta{
-		Version:        MetaVersion,
-		Generation:     db.meta.Generation + 1,
-		PageCount:      uint64(info.Size() / pageSize), //nolint:gosec // G115
-		FreelistRoot:   db.fl.Root(),
-		FreelistFormat: FreelistBTree,
-		TreeRoot:       db.tree.Root(),
+		Version:         MetaVersion,
+		Generation:      db.meta.Generation + 1,
+		PageCount:       uint64(info.Size() / pageSize), //nolint:gosec // G115
+		FreelistRoot:    db.fl.Root(),
+		FreelistFormat:  FreelistBTree,
+		TreeRoot:        db.tree.Root(),
+		ModuleIndexRoot: db.modIdx.Root(),
+		TagIndexRoot:    db.tagIdx.Root(),
+		FileIndexRoot:   db.fileIdx.Root(),
+		TypeIndexRoot:   db.typeIdx.Root(),
 	}
 
 	if err := swapMeta(db.file, newMeta); err != nil {
@@ -515,20 +536,32 @@ func (db *DB) migrateExistingFreelist(m *Meta, pio *FilePageIO) error {
 // ── Transaction API ──
 
 // View executes fn within a read-only transaction. Multiple Views can run
-// concurrently. View acquires the RWMutex read lock.
+// concurrently with each other and with a single Update. Each View sees a
+// consistent snapshot of the database as of the moment it was created.
+//
+// Snapshot isolation is achieved by giving each reader its own buffer pool
+// backed by the data file. The reader's pool caches pages independently,
+// so writer mutations (which occur in the DB's main pool) do not affect
+// in-flight readers.
 func (db *DB) View(_ context.Context, fn func(*tx.ReadTx) error) error {
-	db.rwmu.RLock()
-	defer db.rwmu.RUnlock()
-
 	db.mu.Lock()
 	if db.closed {
 		db.mu.Unlock()
 		return ErrDBClosed
 	}
-	tree := db.tree
+	// Capture the current tree root under the mutex.
+	root := db.tree.Root()
+	file := db.file
 	db.mu.Unlock()
 
-	rtx := tx.NewReadTx(tree)
+	// Create an independent buffer pool for this snapshot. The pool reads
+	// pages from the data file but has its own cache, so it is unaffected
+	// by dirty pages in the writer's pool.
+	snapPIO := NewFilePageIO(file)
+	snapPool := bufpool.New(snapPIO, 64)
+	snapTree := btree.New(root, snapPool, nil)
+
+	rtx := tx.NewReadTx(snapTree)
 	defer rtx.Close()
 
 	return fn(rtx)
@@ -638,12 +671,16 @@ func (db *DB) commitMeta() error {
 	}
 
 	newMeta := &Meta{
-		Version:        MetaVersion,
-		Generation:     db.meta.Generation + 1,
-		PageCount:      uint64(info.Size() / pageSize), //nolint:gosec // G115: file size is always positive.
-		FreelistRoot:   db.fl.Root(),
-		FreelistFormat: FreelistBTree,
-		TreeRoot:       db.tree.Root(),
+		Version:         MetaVersion,
+		Generation:      db.meta.Generation + 1,
+		PageCount:       uint64(info.Size() / pageSize), //nolint:gosec // G115: file size is always positive.
+		FreelistRoot:    db.fl.Root(),
+		FreelistFormat:  FreelistBTree,
+		TreeRoot:        db.tree.Root(),
+		ModuleIndexRoot: db.modIdx.Root(),
+		TagIndexRoot:    db.tagIdx.Root(),
+		FileIndexRoot:   db.fileIdx.Root(),
+		TypeIndexRoot:   db.typeIdx.Root(),
 	}
 
 	if err := swapMeta(db.file, newMeta); err != nil {
@@ -765,3 +802,23 @@ func (db *DB) Stats() (diagnostics.Stats, error) {
 func (db *DB) TestSubsystems() (*bufpool.Pool, *freelist.BTreeFreelist) {
 	return db.pool, db.fl
 }
+
+// ModuleIndex returns the by_module secondary index.
+// The caller must only mutate the index while holding the write lock
+// (i.e., inside an Update callback).
+func (db *DB) ModuleIndex() *index.SecondaryIndex { return db.modIdx }
+
+// TagIndex returns the by_tag secondary index.
+// The caller must only mutate the index while holding the write lock
+// (i.e., inside an Update callback).
+func (db *DB) TagIndex() *index.SecondaryIndex { return db.tagIdx }
+
+// FileIndex returns the by_file secondary index.
+// The caller must only mutate the index while holding the write lock
+// (i.e., inside an Update callback).
+func (db *DB) FileIndex() *index.SecondaryIndex { return db.fileIdx }
+
+// TypeIndex returns the by_type secondary index.
+// The caller must only mutate the index while holding the write lock
+// (i.e., inside an Update callback).
+func (db *DB) TypeIndex() *index.SecondaryIndex { return db.typeIdx }

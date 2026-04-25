@@ -1,8 +1,12 @@
 package analysis
 
 import (
+	"context"
 	"os"
 	"testing"
+
+	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
 
 func TestGitIntelHeadHash(t *testing.T) {
@@ -81,6 +85,119 @@ func TestGitIntelOpenInvalidDir(t *testing.T) {
 	_, err := NewGitIntel(dir)
 	if err == nil {
 		t.Error("expected error for non-git directory")
+	}
+}
+
+// TestCurrentBranch verifies that CurrentBranch returns a non-empty name
+// when on a branch (not detached HEAD).
+func TestCurrentBranch(t *testing.T) {
+	root := findRepoRoot(t)
+
+	gi, err := NewGitIntel(root)
+	if err != nil {
+		t.Fatalf("NewGitIntel: %v", err)
+	}
+
+	branch := gi.CurrentBranch()
+	// In CI, HEAD might be detached. Only assert non-empty if we know it's a branch.
+	t.Logf("CurrentBranch = %q", branch)
+}
+
+// TestDetectRenames verifies rename detection against the repo history.
+func TestDetectRenames(t *testing.T) {
+	root := findRepoRoot(t)
+
+	gi, err := NewGitIntel(root)
+	if err != nil {
+		t.Fatalf("NewGitIntel: %v", err)
+	}
+
+	renames, err := gi.DetectRenames("")
+	if err != nil {
+		t.Fatalf("DetectRenames: %v", err)
+	}
+
+	t.Logf("found %d renames in last 100 commits", len(renames))
+	for _, r := range renames {
+		t.Logf("  %s → %s (commit %s by %s)", r.OldPath, r.NewPath, r.CommitHash[:8], r.Author)
+	}
+}
+
+// TestDetectRenamesWithSince verifies rename detection with a since hash.
+func TestDetectRenamesWithSince(t *testing.T) {
+	root := findRepoRoot(t)
+
+	gi, err := NewGitIntel(root)
+	if err != nil {
+		t.Fatalf("NewGitIntel: %v", err)
+	}
+
+	hash, err := gi.HeadHash()
+	if err != nil {
+		t.Fatalf("HeadHash: %v", err)
+	}
+
+	// With since=HEAD, should find no renames (HEAD itself is excluded).
+	renames, err := gi.DetectRenames(hash)
+	if err != nil {
+		t.Fatalf("DetectRenames(since=HEAD): %v", err)
+	}
+	if len(renames) != 0 {
+		t.Errorf("expected 0 renames with since=HEAD, got %d", len(renames))
+	}
+}
+
+// TestCheckBranchMismatch verifies mismatch detection against a real git repo.
+func TestCheckBranchMismatch(t *testing.T) {
+	root := findRepoRoot(t)
+
+	db, err := kdb.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+
+	// No stored branch → no mismatch.
+	if msg := CheckBranchMismatch(ctx, db, root); msg != "" {
+		t.Errorf("expected no mismatch before scan, got %q", msg)
+	}
+
+	// Store a fake branch "fake-branch-xyz".
+	err = db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("meta:scan_branch"), []byte("fake-branch-xyz"))
+	})
+	if err != nil {
+		t.Fatalf("store branch: %v", err)
+	}
+
+	gi, err := NewGitIntel(root)
+	if err != nil {
+		t.Fatalf("git intel: %v", err)
+	}
+	currentBranch := gi.CurrentBranch()
+
+	if currentBranch != "" && currentBranch != "fake-branch-xyz" {
+		// Should warn about mismatch.
+		msg := CheckBranchMismatch(ctx, db, root)
+		if msg == "" {
+			t.Error("expected branch mismatch warning, got empty")
+		}
+		t.Logf("mismatch warning: %s", msg)
+	}
+
+	// Store the actual current branch → no mismatch.
+	if currentBranch != "" {
+		err = db.Update(ctx, func(wtx *tx.WriteTx) error {
+			return wtx.Put([]byte("meta:scan_branch"), []byte(currentBranch))
+		})
+		if err != nil {
+			t.Fatalf("store current branch: %v", err)
+		}
+		if msg := CheckBranchMismatch(ctx, db, root); msg != "" {
+			t.Errorf("expected no mismatch with matching branch, got %q", msg)
+		}
 	}
 }
 

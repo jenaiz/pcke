@@ -42,7 +42,7 @@ type SyncResult struct {
 
 // Sync reads the knowledge base and generates all output files.
 func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
-	nodes, err := r.loadNodes(ctx)
+	nodes, err := LoadNodes(ctx, r.db)
 	if err != nil {
 		return nil, fmt.Errorf("output: load nodes: %w", err)
 	}
@@ -53,11 +53,11 @@ func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
 		path string
 		fn   func([]analysis.KnowledgeNode) string
 	}{
-		{".context/ARCHITECTURE.md", renderArchitecture},
-		{".context/CONVENTIONS.md", renderConventions},
-		{".context/HISTORY.md", renderHistory},
-		{".context/DECISIONS.md", renderDecisions},
-		{".context/CONSTRAINTS.md", renderConstraints},
+		{".context/ARCHITECTURE.md", RenderArchitecture},
+		{".context/CONVENTIONS.md", RenderConventions},
+		{".context/HISTORY.md", RenderHistory},
+		{".context/DECISIONS.md", RenderDecisions},
+		{".context/CONSTRAINTS.md", RenderConstraints},
 	}
 
 	for _, g := range generators {
@@ -98,11 +98,11 @@ func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
 	return result, nil
 }
 
-// loadNodes reads all knowledge nodes from the database using cursor
+// LoadNodes reads all knowledge nodes from the database using cursor
 // iteration over the "kn:" prefix.
-func (r *Renderer) loadNodes(ctx context.Context) ([]analysis.KnowledgeNode, error) {
+func LoadNodes(ctx context.Context, db *kdb.DB) ([]analysis.KnowledgeNode, error) {
 	var nodes []analysis.KnowledgeNode
-	if err := r.db.View(ctx, func(rtx *tx.ReadTx) error {
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
 		prefix := []byte("kn:")
 		cursor := rtx.Cursor()
 		for ok := cursor.Seek(prefix); ok; ok = cursor.Next() {

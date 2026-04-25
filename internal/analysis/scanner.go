@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jenaiz/pcke/internal/analysis/ast"
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/index"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
 
@@ -32,6 +34,10 @@ type KnowledgeNode struct {
 	ContentHash string    `json:"content_hash"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	// Deep analysis fields (populated when --deep is used).
+	Entities []ast.Entity `json:"entities,omitempty"`
+	Imports  []ast.Import `json:"imports,omitempty"`
 }
 
 // EvolutionLog records a change event for a knowledge node.
@@ -44,24 +50,72 @@ type EvolutionLog struct {
 	Timestamp  time.Time `json:"timestamp"`
 }
 
+// Relation records a directed edge between two knowledge nodes.
+// See PRD §5.2 — collection: relations.
+type Relation struct {
+	ID           string    `json:"id"`
+	SourceNodeID string    `json:"source_node_id"`
+	TargetNodeID string    `json:"target_node_id"`
+	Type         string    `json:"type"`
+	Source       string    `json:"source"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 const (
 	// Key prefixes for kdb storage.
 	prefixNode     = "kn:"
 	prefixEvol     = "el:"
+	prefixRel      = "rel:"
 	prefixMeta     = "meta:"
 	metaLastCommit = "meta:last_scan_commit"
+	metaScanBranch = "meta:scan_branch"
 )
 
 // ScanResult summarises a completed scan.
 type ScanResult struct {
-	NodesCreated int
-	NodesUpdated int
-	NodesDeleted int
-	FilesScanned int
-	FilesSkipped int
-	SecretsFound int
-	CommitHash   string
-	Duration     time.Duration
+	NodesCreated      int
+	NodesUpdated      int
+	NodesDeleted      int
+	FilesScanned      int
+	FilesSkipped      int
+	SecretsFound      int
+	EntitiesExtracted int
+	RelationsCreated  int
+	CommitHash        string
+	Duration          time.Duration
+}
+
+// CheckBranchMismatch reads the stored scan branch from the knowledge base
+// and compares it against the current HEAD branch. Returns a non-empty
+// warning message if they differ, or "" if they match (or if no prior scan
+// exists).
+func CheckBranchMismatch(ctx context.Context, db *kdb.DB, root string) string {
+	git, err := NewGitIntel(root)
+	if err != nil {
+		return ""
+	}
+
+	currentBranch := git.CurrentBranch()
+	if currentBranch == "" {
+		return "" // detached HEAD — skip check
+	}
+
+	var storedBranch string
+	_ = db.View(ctx, func(rtx *tx.ReadTx) error {
+		val, err := rtx.Get([]byte(metaScanBranch))
+		if err != nil {
+			return err
+		}
+		storedBranch = string(val)
+		return nil
+	})
+
+	if storedBranch == "" || storedBranch == currentBranch {
+		return ""
+	}
+
+	return fmt.Sprintf("warning: knowledge base was built on branch %q but current branch is %q; consider running 'pcke scan'",
+		storedBranch, currentBranch)
 }
 
 // Scanner performs file tree analysis and persists results to a kdb database.
@@ -70,21 +124,39 @@ type Scanner struct {
 	cfg  config.ScanConfig
 	git  *GitIntel
 	root string // Repository root directory.
+	deep bool   // Enable AST-based deep analysis.
+	astP *ast.Parser
 }
 
 // NewScanner creates a [Scanner] for the repository at root, persisting
 // results into db. The cfg controls redaction and exclusion behaviour.
-func NewScanner(root string, db *kdb.DB, cfg config.ScanConfig) (*Scanner, error) {
+// Use [WithDeep] to enable AST-based entity extraction.
+func NewScanner(root string, db *kdb.DB, cfg config.ScanConfig, opts ...ScanOption) (*Scanner, error) {
 	gitIntel, err := NewGitIntel(root)
 	if err != nil {
 		return nil, fmt.Errorf("analysis: init git: %w", err)
 	}
-	return &Scanner{
+	s := &Scanner{
 		db:   db,
 		cfg:  cfg,
 		git:  gitIntel,
 		root: root,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.deep {
+		s.astP = ast.NewParser()
+	}
+	return s, nil
+}
+
+// ScanOption configures optional Scanner behaviour.
+type ScanOption func(*Scanner)
+
+// WithDeep enables AST-based deep analysis (tree-sitter entity extraction).
+func WithDeep() ScanOption {
+	return func(s *Scanner) { s.deep = true }
 }
 
 // Scan performs a full or incremental scan based on the full flag.
@@ -92,6 +164,10 @@ func NewScanner(root string, db *kdb.DB, cfg config.ScanConfig) (*Scanner, error
 // files changed since the last scan commit.
 func (s *Scanner) Scan(ctx context.Context, full bool) (*ScanResult, error) {
 	start := time.Now()
+
+	if s.astP != nil {
+		defer s.astP.Close()
+	}
 
 	headHash, err := s.git.HeadHash()
 	if err != nil {
@@ -115,18 +191,71 @@ func (s *Scanner) Scan(ctx context.Context, full bool) (*ScanResult, error) {
 	result := &ScanResult{CommitHash: headHash}
 	now := time.Now()
 
-	nodes, seen := s.processFiles(files, existing, full, now, result)
+	nodes, seen := s.processFiles(ctx, files, existing, full, now, result)
 
 	// Mark deleted files.
 	nodes = s.markDeleted(existing, seen, now, nodes, result)
 
 	// Persist all nodes + last scan commit in a single transaction.
-	if err := s.persistAll(ctx, nodes, headHash); err != nil {
+	if err := s.persistAll(ctx, nodes, headHash, existing); err != nil {
 		return nil, err
+	}
+
+	// Populate relations from import graph (deep mode only).
+	if s.deep {
+		if err := s.persistRelations(ctx, nodes, result); err != nil {
+			return nil, fmt.Errorf("analysis: persist relations: %w", err)
+		}
+	}
+
+	// Detect renames and persist evolution logs.
+	lastCommit := s.getLastCommit(ctx)
+	if renames, err := s.git.DetectRenames(lastCommit); err == nil && len(renames) > 0 {
+		if err := s.persistRenames(ctx, renames); err != nil {
+			return nil, fmt.Errorf("analysis: persist renames: %w", err)
+		}
 	}
 
 	result.Duration = time.Since(start)
 	return result, nil
+}
+
+// getLastCommit reads the stored last scan commit hash from the KB.
+func (s *Scanner) getLastCommit(ctx context.Context) string {
+	var hash string
+	_ = s.db.View(ctx, func(rtx *tx.ReadTx) error {
+		val, err := rtx.Get([]byte(metaLastCommit))
+		if err != nil {
+			return err
+		}
+		hash = string(val)
+		return nil
+	})
+	return hash
+}
+
+// persistRenames stores rename evolution log entries.
+func (s *Scanner) persistRenames(ctx context.Context, renames []RenameEntry) error {
+	return s.db.Update(ctx, func(wtx *tx.WriteTx) error {
+		for _, r := range renames {
+			entry := EvolutionLog{
+				ID:         fmt.Sprintf("%s:%s→%s", r.CommitHash[:8], r.OldPath, r.NewPath),
+				NodeID:     r.NewPath,
+				CommitHash: r.CommitHash,
+				ChangeType: "renamed",
+				Author:     r.Author,
+				Timestamp:  r.Timestamp,
+			}
+			data, err := json.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("marshal rename %s: %w", entry.ID, err)
+			}
+			if err := wtx.Put([]byte(prefixEvol+entry.ID), data); err != nil {
+				return fmt.Errorf("put rename %s: %w", entry.ID, err)
+			}
+		}
+		return nil
+	})
 }
 
 // collectAndGrow collects scannable files and pre-grows the database.
@@ -145,7 +274,7 @@ func (s *Scanner) collectAndGrow() ([]string, error) {
 }
 
 // processFiles analyses each collected file and returns nodes to persist.
-func (s *Scanner) processFiles(files []string, existing map[string]KnowledgeNode, full bool, now time.Time, result *ScanResult) ([]*KnowledgeNode, map[string]bool) {
+func (s *Scanner) processFiles(ctx context.Context, files []string, existing map[string]KnowledgeNode, full bool, now time.Time, result *ScanResult) ([]*KnowledgeNode, map[string]bool) {
 	seen := map[string]bool{}
 	var nodes []*KnowledgeNode
 
@@ -167,6 +296,10 @@ func (s *Scanner) processFiles(files []string, existing map[string]KnowledgeNode
 		if node == nil {
 			result.FilesSkipped++
 			continue
+		}
+
+		if s.deep {
+			s.deepAnalyse(ctx, node, relPath, result)
 		}
 
 		if _, ok := existing[relPath]; ok {
@@ -196,18 +329,82 @@ func (s *Scanner) markDeleted(existing map[string]KnowledgeNode, seen map[string
 }
 
 // persistAll writes all nodes and the last scan commit atomically.
-func (s *Scanner) persistAll(ctx context.Context, nodes []*KnowledgeNode, headHash string) error {
+// It also updates all four secondary indexes (by_module, by_tag, by_file, by_type).
+func (s *Scanner) persistAll(ctx context.Context, nodes []*KnowledgeNode, headHash string, existing map[string]KnowledgeNode) error {
+	branch := s.git.CurrentBranch()
 	return s.db.Update(ctx, func(wtx *tx.WriteTx) error {
 		for _, node := range nodes {
+			pk := []byte(prefixNode + node.ID)
+
+			// Compute old index keys from the previous version (if any).
+			var oldModKeys, oldFileKeys, oldTypeKeys [][]byte
+			if prev, ok := existing[node.ID]; ok {
+				oldModKeys = index.ModuleKeys(prev.Module)
+				oldFileKeys = index.FileKeys(prev.FilePath)
+				oldTypeKeys = index.TypeKeys(prev.Type)
+			}
+
+			// Compute new index keys.
+			newModKeys := index.ModuleKeys(node.Module)
+			newFileKeys := index.FileKeys(node.FilePath)
+			newTypeKeys := index.TypeKeys(node.Type)
+
+			// Update secondary indexes (handles insert + update + soft-delete).
+			if err := s.db.ModuleIndex().Update(pk, oldModKeys, newModKeys); err != nil {
+				return fmt.Errorf("index module %s: %w", node.ID, err)
+			}
+			if err := s.db.FileIndex().Update(pk, oldFileKeys, newFileKeys); err != nil {
+				return fmt.Errorf("index file %s: %w", node.ID, err)
+			}
+			if err := s.db.TypeIndex().Update(pk, oldTypeKeys, newTypeKeys); err != nil {
+				return fmt.Errorf("index type %s: %w", node.ID, err)
+			}
+
+			// Marshal and persist the node.
 			data, err := json.Marshal(node)
 			if err != nil {
 				return fmt.Errorf("marshal node %s: %w", node.ID, err)
 			}
-			if err := wtx.Put([]byte(prefixNode+node.ID), data); err != nil {
+			if err := wtx.Put(pk, data); err != nil {
 				return fmt.Errorf("put node %s: %w", node.ID, err)
 			}
 		}
-		return wtx.Put([]byte(metaLastCommit), []byte(headHash))
+		if err := wtx.Put([]byte(metaLastCommit), []byte(headHash)); err != nil {
+			return err
+		}
+		if branch != "" {
+			return wtx.Put([]byte(metaScanBranch), []byte(branch))
+		}
+		return nil
+	})
+}
+
+// persistRelations creates import-graph relations from deep-scanned nodes.
+// Each import in a node produces a relation: source=node.ID → target=import.Path.
+func (s *Scanner) persistRelations(ctx context.Context, nodes []*KnowledgeNode, result *ScanResult) error {
+	now := time.Now()
+	return s.db.Update(ctx, func(wtx *tx.WriteTx) error {
+		for _, node := range nodes {
+			for _, imp := range node.Imports {
+				rel := Relation{
+					ID:           node.ID + "→" + imp.Path,
+					SourceNodeID: node.ID,
+					TargetNodeID: imp.Path,
+					Type:         "imports",
+					Source:       "auto",
+					CreatedAt:    now,
+				}
+				data, err := json.Marshal(rel)
+				if err != nil {
+					return fmt.Errorf("marshal relation %s: %w", rel.ID, err)
+				}
+				if err := wtx.Put([]byte(prefixRel+rel.ID), data); err != nil {
+					return fmt.Errorf("put relation %s: %w", rel.ID, err)
+				}
+				result.RelationsCreated++
+			}
+		}
+		return nil
 	})
 }
 
@@ -333,6 +530,23 @@ func (s *Scanner) analyseFile(relPath, hash string, now time.Time) *KnowledgeNod
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
+}
+
+// deepAnalyse runs tree-sitter AST parsing on a file and populates
+// the node's Entities and Imports fields. Non-fatal on failure.
+func (s *Scanner) deepAnalyse(ctx context.Context, node *KnowledgeNode, relPath string, result *ScanResult) {
+	ext := strings.ToLower(filepath.Ext(relPath))
+	if !ast.IsSupported(ext) {
+		return
+	}
+	absPath := filepath.Join(s.root, relPath)
+	parsed, err := s.astP.ParseFile(ctx, absPath, ext)
+	if err != nil || parsed == nil {
+		return
+	}
+	node.Entities = parsed.Entities
+	node.Imports = parsed.Imports
+	result.EntitiesExtracted += len(parsed.Entities)
 }
 
 // enrichWithGit adds git-derived stats to a node.

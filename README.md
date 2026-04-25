@@ -1,6 +1,6 @@
 # pcke — Project Context & Knowledge Engine
 
-> **Status: pre-alpha** (Phase 1 — search & checkpointing)
+> **Status: pre-alpha** (Phase 2 — deep analysis & MCP)
 
 **pcke** is a Long-Term Engineering Memory — a local system that extracts
 knowledge from codebases and serves it to AI coding agents (GitHub Copilot,
@@ -11,6 +11,7 @@ years of project history.
 - **Single binary, zero dependencies.** No Docker, no cloud, no API keys.
 - **Custom storage engine (`kdb`).** B+tree, WAL, inverted index, query
   language — built from scratch.
+- **MCP server.** Exposes project knowledge to AI agents via the Model Context Protocol.
 
 ## Quickstart
 
@@ -22,14 +23,87 @@ make verify   # lint + test + build
 # Scan the repository and build the knowledge base
 ./bin/pcke scan
 
+# Deep analysis with AST extraction (requires C compiler for tree-sitter)
+./bin/pcke scan --deep
+
 # Generate context files for AI agents
 ./bin/pcke sync
+
+# Full-text search
+./bin/pcke recall "error handling strategy"
+
+# Offline compaction (reclaim space after deletions)
+./bin/pcke compact
+
+# Start MCP server (stdio transport)
+./bin/pcke serve
 ```
 
-Requirements: **Go 1.23+**, [golangci-lint](https://golangci-lint.run/) v1.61+.
+Requirements: **Go 1.25+**, a **C compiler** (for tree-sitter / CGo), [golangci-lint](https://golangci-lint.run/) v2.
 
 > **Note:** `pcke` uses [go-git](https://github.com/go-git/go-git) for Git
-> history analysis (pulled automatically by `go mod tidy`).
+> history analysis and [go-tree-sitter](https://github.com/smacker/go-tree-sitter)
+> for AST extraction (pulled automatically by `go mod tidy`).
+
+## Using pcke with AI agents (MCP)
+
+pcke includes a built-in [MCP](https://modelcontextprotocol.io/) server that
+exposes project knowledge to AI coding agents over stdio.
+
+### Setup
+
+1. Build pcke and scan your project:
+
+```bash
+cd /path/to/your-project
+/path/to/pcke scan --deep
+```
+
+2. Configure your AI agent to use pcke as an MCP server.
+
+**GitHub Copilot** — add to `.vscode/mcp.json` in your project:
+
+```json
+{
+  "servers": {
+    "pcke": {
+      "type": "stdio",
+      "command": "/path/to/pcke",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+**Claude Code** — add to `.mcp.json` in your project:
+
+```json
+{
+  "mcpServers": {
+    "pcke": {
+      "command": "/path/to/pcke",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Available MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `recall` | Semantic search across knowledge nodes (substring matching with weighted scoring) |
+| `get_module_context` | Get all entities, dependencies, and metadata for a specific module |
+| `get_constraints` | Infer Go and infrastructure constraints from the knowledge base |
+| `get_history` | Get evolution history for a specific file path |
+
+### Available MCP resources
+
+| Resource URI | Description |
+|-------------|-------------|
+| `pcke://architecture` | Rendered architecture overview of the project |
+| `pcke://constraints` | Rendered constraints and conventions |
+| `pcke://decisions` | Rendered design decisions and ADRs |
 
 ## Documentation
 
@@ -47,7 +121,7 @@ Requirements: **Go 1.23+**, [golangci-lint](https://golangci-lint.run/) v1.61+.
 | −1 | Bootstrap (CI, lint, release pipeline) | **complete** |
 | 0 | Storage engine + CLI scan/sync | **complete** |
 | 1 | Search & checkpointing | **complete** |
-| 2 | Deep analysis & MCP | not started |
+| 2 | Deep analysis & MCP | **complete** |
 | 3 | Query language & polish | not started |
 | 4 | v1.0 | not started |
 
@@ -64,6 +138,9 @@ A crash-safe embedded key-value store built from scratch:
 - **Freelist** — B+tree-backed page allocator (migrated from linked-list bootstrap).
 - **Double-meta pages** — Atomic generation-based swap for crash recovery.
 - **Transactions** — `View` (concurrent readers) and `Update` (exclusive writer) with WAL-first mutation, auto-commit, and meta swap.
+- **CoW snapshot isolation** — readers see a consistent snapshot without blocking writers.
+- **Secondary indexes** — by_module, by_tag, by_file, by_type for fast lookups.
+- **Offline compaction** — `pcke compact` copies live keys to a fresh file, reclaiming space.
 - **Binary encoding** — Varint, little-endian, CRC32C, tagged record schema v1.
 - **File locking** — Cross-platform `flock` with LOCK/PID single-process guard.
 
@@ -80,15 +157,26 @@ pcke includes a built-in full-text search engine optimized for code knowledge:
 #### Quick example
 
 ```bash
-pcke init
-pcke scan --full
+pcke scan --deep
 pcke recall "error handling strategy"
 ```
 
+### Deep analysis (`internal/analysis`)
+
+- **tree-sitter AST extraction** — parses Go source files to extract functions, types, interfaces, and structs as knowledge entities.
+- **Relations populator** — automatically discovers import relationships between modules.
+- **Git history analysis** — extracts commit history, branch detection, and rename tracking.
+- **Secrets detection** — scans for accidentally committed credentials (AWS keys, tokens, etc.).
+
+### MCP server (`internal/mcp`)
+
+- **4 tools** — `recall`, `get_module_context`, `get_constraints`, `get_history`.
+- **3 resources** — `pcke://architecture`, `pcke://constraints`, `pcke://decisions`.
+- **stdio transport** — compatible with VS Code, Claude Code, and any MCP client.
+
 ### CLI (`cmd/pcke`)
 
-Cobra-based with subcommands: `init`, `scan`, `sync`, `rule`, `note`, `status`, `modules`, `diagnostics`, `config`, `recall`.
-Most commands are stubs awaiting the analysis and output layers; `recall` performs full-text search with BM25 ranking.
+Cobra-based with subcommands: `init`, `scan`, `scan --deep`, `sync`, `rule`, `note`, `status`, `modules`, `diagnostics`, `config`, `recall`, `compact`, `serve`.
 
 ### Configuration (`internal/config`)
 

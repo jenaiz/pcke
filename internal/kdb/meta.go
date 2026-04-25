@@ -16,6 +16,11 @@
 //	44       8    FreelistRoot   (page ID of first freelist page, 0 = none)
 //	52       1    FreelistFormat (0 = linked-list/T4, 1 = B+tree/T8)
 //	53       3    Reserved       (must be 0)
+//	56       8    TreeRoot       (B+tree root page ID)
+//	64       8    ModuleIndexRoot (by_module secondary index root, 0 = empty)
+//	72       8    TagIndexRoot    (by_tag secondary index root, 0 = empty)
+//	80       8    FileIndexRoot   (by_file secondary index root, 0 = empty)
+//	88       8    TypeIndexRoot   (by_type secondary index root, 0 = empty)
 //
 // Atomic swap protocol:
 //  1. Write the INACTIVE meta page (the one with the lower generation).
@@ -45,13 +50,17 @@ const (
 	metaSlotB = 1
 
 	// Meta payload offsets (relative to start of page, after the 24-byte header).
-	metaOffVersion        = page.HeaderSize
-	metaOffGeneration     = metaOffVersion + 4
-	metaOffPageCount      = metaOffGeneration + 8
-	metaOffFreelistRoot   = metaOffPageCount + 8
-	metaOffFreelistFormat = metaOffFreelistRoot + 8
-	metaOffReserved       = metaOffFreelistFormat + 1
-	metaOffTreeRoot       = metaOffReserved + 3
+	metaOffVersion         = page.HeaderSize
+	metaOffGeneration      = metaOffVersion + 4
+	metaOffPageCount       = metaOffGeneration + 8
+	metaOffFreelistRoot    = metaOffPageCount + 8
+	metaOffFreelistFormat  = metaOffFreelistRoot + 8
+	metaOffReserved        = metaOffFreelistFormat + 1
+	metaOffTreeRoot        = metaOffReserved + 3
+	metaOffModuleIndexRoot = metaOffTreeRoot + 8
+	metaOffTagIndexRoot    = metaOffModuleIndexRoot + 8
+	metaOffFileIndexRoot   = metaOffTagIndexRoot + 8
+	metaOffTypeIndexRoot   = metaOffFileIndexRoot + 8
 )
 
 // FreelistFormat indicates the freelist storage strategy.
@@ -66,12 +75,16 @@ const (
 
 // Meta holds the decoded contents of a meta page.
 type Meta struct {
-	Version        uint32
-	Generation     uint64
-	PageCount      uint64
-	FreelistRoot   uint64
-	FreelistFormat FreelistFormat
-	TreeRoot       uint64
+	Version         uint32
+	Generation      uint64
+	PageCount       uint64
+	FreelistRoot    uint64
+	FreelistFormat  FreelistFormat
+	TreeRoot        uint64
+	ModuleIndexRoot uint64
+	TagIndexRoot    uint64
+	FileIndexRoot   uint64
+	TypeIndexRoot   uint64
 }
 
 // encodeMeta writes m into a 4096-byte page buffer as a TypeMeta page with
@@ -85,6 +98,10 @@ func encodeMeta(buf []byte, m *Meta) {
 	encoding.PutUint64(buf[metaOffFreelistRoot:], m.FreelistRoot)
 	buf[metaOffFreelistFormat] = byte(m.FreelistFormat)
 	encoding.PutUint64(buf[metaOffTreeRoot:], m.TreeRoot)
+	encoding.PutUint64(buf[metaOffModuleIndexRoot:], m.ModuleIndexRoot)
+	encoding.PutUint64(buf[metaOffTagIndexRoot:], m.TagIndexRoot)
+	encoding.PutUint64(buf[metaOffFileIndexRoot:], m.FileIndexRoot)
+	encoding.PutUint64(buf[metaOffTypeIndexRoot:], m.TypeIndexRoot)
 
 	// Recompute checksum after writing payload.
 	page.SetChecksum(buf)
@@ -102,12 +119,16 @@ func decodeMeta(buf []byte) (*Meta, error) {
 	}
 
 	return &Meta{
-		Version:        encoding.Uint32(buf[metaOffVersion:]),
-		Generation:     encoding.Uint64(buf[metaOffGeneration:]),
-		PageCount:      encoding.Uint64(buf[metaOffPageCount:]),
-		FreelistRoot:   encoding.Uint64(buf[metaOffFreelistRoot:]),
-		FreelistFormat: FreelistFormat(buf[metaOffFreelistFormat]),
-		TreeRoot:       encoding.Uint64(buf[metaOffTreeRoot:]),
+		Version:         encoding.Uint32(buf[metaOffVersion:]),
+		Generation:      encoding.Uint64(buf[metaOffGeneration:]),
+		PageCount:       encoding.Uint64(buf[metaOffPageCount:]),
+		FreelistRoot:    encoding.Uint64(buf[metaOffFreelistRoot:]),
+		FreelistFormat:  FreelistFormat(buf[metaOffFreelistFormat]),
+		TreeRoot:        encoding.Uint64(buf[metaOffTreeRoot:]),
+		ModuleIndexRoot: encoding.Uint64(buf[metaOffModuleIndexRoot:]),
+		TagIndexRoot:    encoding.Uint64(buf[metaOffTagIndexRoot:]),
+		FileIndexRoot:   encoding.Uint64(buf[metaOffFileIndexRoot:]),
+		TypeIndexRoot:   encoding.Uint64(buf[metaOffTypeIndexRoot:]),
 	}, nil
 }
 

@@ -28,6 +28,14 @@ func newInitCmd() *cobra.Command {
 	}
 }
 
+// warnBranchMismatch prints a warning to stderr if the current branch differs
+// from the branch recorded during the last scan.
+func warnBranchMismatch(db *kdb.DB, cwd string) {
+	if msg := analysis.CheckBranchMismatch(context.Background(), db, cwd); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+	}
+}
+
 func newScanCmd() *cobra.Command {
 	var full bool
 
@@ -84,6 +92,7 @@ func newSyncCmd() *cobra.Command {
 				return fmt.Errorf("sync: open database: %w", err)
 			}
 			defer func() { _ = db.Close() }()
+			warnBranchMismatch(db, cwd)
 
 			renderer := output.NewRenderer(cwd, db)
 			result, err := renderer.Sync(context.Background())
@@ -158,6 +167,7 @@ func newDiagnosticsCmd() *cobra.Command {
 				return fmt.Errorf("diagnostics: open database: %w", err)
 			}
 			defer func() { _ = db.Close() }()
+			warnBranchMismatch(db, cwd)
 
 			stats, err := db.Stats()
 			if err != nil {
@@ -244,6 +254,7 @@ Results are ranked using BM25 relevance scoring.`,
 				return fmt.Errorf("recall: open database: %w", err)
 			}
 			defer func() { _ = db.Close() }()
+			warnBranchMismatch(db, cwd)
 
 			// Build FTS index from the DB.
 			idx := fts.NewIndex()
@@ -281,4 +292,35 @@ Results are ranked using BM25 relevance scoring.`,
 	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of results to return")
 
 	return cmd
+}
+
+func newCompactCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "compact",
+		Short: "Compact the database to reclaim space",
+		Long: `Offline compaction copies all live key-value pairs into a fresh database
+file, reclaiming free pages and pruning soft-deleted data.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("compact: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("compact: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			result, err := db.Compact(context.Background())
+			if err != nil {
+				return fmt.Errorf("compact: %w", err)
+			}
+
+			reduction := float64(result.OldSize-result.NewSize) / float64(result.OldSize) * 100
+			fmt.Printf("compact complete: %d keys copied, %d → %d bytes (%.1f%% reduction)\n",
+				result.KeysCopied, result.OldSize, result.NewSize, reduction)
+			return nil
+		},
+	}
 }
