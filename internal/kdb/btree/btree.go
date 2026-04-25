@@ -128,6 +128,44 @@ func (t *Tree) Root() uint64 {
 	return t.root
 }
 
+// KeyCount returns the approximate number of keys in the tree. The count is
+// maintained incrementally on [Tree.Put] and [Tree.Delete] operations.
+func (t *Tree) KeyCount() int64 {
+	return t.count
+}
+
+// Depth returns the depth of the tree: 0 for an empty tree, 1 for a single
+// leaf, 2 for a root internal node with leaf children, etc. It traverses the
+// leftmost path from root to leaf.
+func (t *Tree) Depth() int {
+	if t.root == 0 {
+		return 0
+	}
+
+	depth := 0
+	pageID := t.root
+
+	for {
+		depth++
+
+		frame, err := t.pool.Pin(pageID)
+		if err != nil {
+			return depth
+		}
+
+		pt := page.GetType(frame.Buf)
+		if pt == page.TypeLeaf {
+			t.pool.Unpin(pageID)
+			return depth
+		}
+
+		// Internal node: follow the leftmost child (FirstChild).
+		firstChild := encoding.Uint64(frame.Buf[offFirstChild:])
+		t.pool.Unpin(pageID)
+		pageID = firstChild
+	}
+}
+
 // Get looks up a key and returns its value. Returns ErrKeyNotFound if the key
 // does not exist.
 func (t *Tree) Get(key []byte) ([]byte, error) {

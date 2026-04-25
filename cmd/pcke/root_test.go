@@ -52,7 +52,7 @@ func TestRootVersion(t *testing.T) {
 func TestSubcommandStubs(t *testing.T) {
 	t.Parallel()
 
-	subs := []string{"init", "scan", "sync", "rule", "note", "status", "modules", "diagnostics"}
+	subs := []string{"init", "scan", "sync", "rule", "note", "status", "modules"}
 
 	for _, sub := range subs {
 		t.Run(sub, func(t *testing.T) {

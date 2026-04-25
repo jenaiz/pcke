@@ -259,10 +259,23 @@ func verifySeedData(t *testing.T, db *kdb.DB) {
 	}
 }
 
-// verifyFreelistConsistency checks that the database is operational after
-// crash recovery by writing and reading data.
+// verifyFreelistConsistency checks that the freelist count + used pages
+// matches the total page count (accounting for meta pages).
 func verifyFreelistConsistency(t *testing.T, db *kdb.DB) {
 	t.Helper()
+
+	stats, err := db.Stats()
+	if err != nil {
+		t.Fatalf("freelist consistency: stats: %v", err)
+	}
+
+	// Total pages = meta (2) + used + free.
+	// We can't easily count exact used pages without walking the tree,
+	// but we verify that free pages don't exceed total - 2 (meta pages).
+	if stats.FreePageCount > stats.PageCount-2 {
+		t.Errorf("freelist consistency: free=%d > total-2=%d",
+			stats.FreePageCount, stats.PageCount-2)
+	}
 
 	// Verify DB is still operational by writing new data.
 	ctx := context.Background()

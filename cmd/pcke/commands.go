@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/jenaiz/pcke/internal/kdb"
 )
 
 func newInitCmd() *cobra.Command {
@@ -84,14 +87,46 @@ func newModulesCmd() *cobra.Command {
 }
 
 func newDiagnosticsCmd() *cobra.Command {
-	return &cobra.Command{
+	var format string
+
+	cmd := &cobra.Command{
 		Use:   "diagnostics",
 		Short: "Show database diagnostics",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke diagnostics: not yet implemented (Phase 0)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("diagnostics: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("diagnostics: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			stats, err := db.Stats()
+			if err != nil {
+				return fmt.Errorf("diagnostics: gather stats: %w", err)
+			}
+
+			switch format {
+			case "json":
+				data, err := stats.JSON()
+				if err != nil {
+					return fmt.Errorf("diagnostics: marshal JSON: %w", err)
+				}
+				fmt.Println(string(data))
+			default:
+				fmt.Print(stats.Human())
+			}
+
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&format, "format", "text", "Output format: text or json")
+
+	return cmd
 }
 
 func newConfigCmd() *cobra.Command {
