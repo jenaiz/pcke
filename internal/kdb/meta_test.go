@@ -25,14 +25,16 @@ func TestInitMetaWritesBothSlots(t *testing.T) {
 	if m.Version != kdb.MetaVersion {
 		t.Errorf("Version = %d, want %d", m.Version, kdb.MetaVersion)
 	}
-	if m.Generation != 1 {
-		t.Errorf("Generation = %d, want 1", m.Generation)
+	// After T10 wiring, Open performs freelist migration which bumps generation.
+	if m.Generation < 1 {
+		t.Errorf("Generation = %d, want >= 1", m.Generation)
 	}
 	if m.PageCount != uint64(kdb.GrowthChunk) {
 		t.Errorf("PageCount = %d, want %d", m.PageCount, kdb.GrowthChunk)
 	}
-	if m.FreelistRoot != 0 {
-		t.Errorf("FreelistRoot = %d, want 0", m.FreelistRoot)
+	// FreelistFormat should be BTree after migration.
+	if m.FreelistFormat != kdb.FreelistBTree {
+		t.Errorf("FreelistFormat = %d, want %d (BTree)", m.FreelistFormat, kdb.FreelistBTree)
 	}
 }
 
@@ -217,17 +219,10 @@ func TestBothMetaCorrupted(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Reopen — should still succeed (file not empty, initIfEmpty skipped).
-	// But ReadMeta should fail.
-	db2, err := kdb.Open(dir, nil)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer func() { _ = db2.Close() }()
-
-	_, err = db2.ReadMeta()
+	// Reopen should fail because wireSubsystems cannot load meta.
+	_, err = kdb.Open(dir, nil)
 	if err == nil {
-		t.Fatal("expected error reading corrupted meta, got nil")
+		t.Fatal("expected error opening DB with corrupted meta, got nil")
 	}
 }
 
