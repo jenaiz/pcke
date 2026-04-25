@@ -15,6 +15,7 @@ import (
 
 	"github.com/jenaiz/pcke/internal/kdb/btree"
 	"github.com/jenaiz/pcke/internal/kdb/bufpool"
+	"github.com/jenaiz/pcke/internal/kdb/diagnostics"
 	"github.com/jenaiz/pcke/internal/kdb/freelist"
 	"github.com/jenaiz/pcke/internal/kdb/lock"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
@@ -615,6 +616,70 @@ func (db *DB) replayWAL() error {
 	checkCrashHook("db-post-wal-replay")
 
 	return nil
+}
+
+// Stats gathers live diagnostic counters from all kdb subsystems and returns
+// a snapshot. The method acquires internal locks and is safe for concurrent
+// use, but should not be called in hot paths.
+func (db *DB) Stats() (diagnostics.Stats, error) {
+	db.mu.Lock()
+	if db.closed {
+		db.mu.Unlock()
+		return diagnostics.Stats{}, ErrDBClosed
+	}
+
+	// Snapshot references while holding db.mu.
+	f := db.file
+	w := db.wal
+	p := db.pool
+	fl := db.fl
+	tr := db.tree
+	m := db.meta
+	db.mu.Unlock()
+
+	var s diagnostics.Stats
+
+	// Storage.
+	info, err := f.Stat()
+	if err != nil {
+		return s, fmt.Errorf("kdb: stat data file: %w", err)
+	}
+	s.DataFileBytes = info.Size()
+	s.PageCount = uint64(info.Size() / pageSize) //nolint:gosec // G115: file size is always positive.
+
+	// Free pages.
+	s.FreePageCount = uint64(fl.FreeCount()) //nolint:gosec // G115: count is non-negative.
+
+	// B+tree.
+	s.TreeDepth = tr.Depth()
+	kc := tr.KeyCount()
+	if kc > 0 {
+		s.KeyCount = uint64(kc) //nolint:gosec // G115: count is non-negative.
+	}
+
+	// WAL.
+	walSize, err := w.FileSize()
+	if err != nil {
+		return s, fmt.Errorf("kdb: wal file size: %w", err)
+	}
+	s.WALTotalBytes = walSize
+	nextLSN := w.NextLSN()
+	if nextLSN > 1 {
+		s.ActiveLSN = nextLSN - 1
+	}
+
+	// Buffer pool.
+	poolStats := p.Stats()
+	s.BufferPoolSize = poolStats.MaxPages
+	s.DirtyPages = poolStats.DirtyPages
+	s.PinnedPages = poolStats.PinnedPages
+
+	// Meta.
+	s.Generation = m.Generation
+	s.FreelistRoot = m.FreelistRoot
+	s.FreelistFormat = uint8(m.FreelistFormat)
+
+	return s, nil
 }
 
 // TestSubsystems returns the internal buffer pool and freelist for use in
