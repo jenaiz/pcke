@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/jenaiz/pcke/internal/analysis"
+	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
 )
 
@@ -21,14 +24,44 @@ func newInitCmd() *cobra.Command {
 }
 
 func newScanCmd() *cobra.Command {
-	return &cobra.Command{
+	var full bool
+
+	cmd := &cobra.Command{
 		Use:   "scan",
 		Short: "Scan the repository and update the knowledge base",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke scan: not yet implemented (Phase 0)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("scan: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("scan: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			cfg := config.Defaults().Scan
+			scanner, err := analysis.NewScanner(cwd, db, cfg)
+			if err != nil {
+				return fmt.Errorf("scan: init scanner: %w", err)
+			}
+
+			result, err := scanner.Scan(context.Background(), full)
+			if err != nil {
+				return fmt.Errorf("scan: %w", err)
+			}
+
+			fmt.Printf("scan complete: %d created, %d updated, %d deleted (%d files in %s)\n",
+				result.NodesCreated, result.NodesUpdated, result.NodesDeleted,
+				result.FilesScanned, result.Duration.Round(1e6))
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&full, "full", false, "Force a full scan (rebuild all nodes)")
+
+	return cmd
 }
 
 func newSyncCmd() *cobra.Command {
