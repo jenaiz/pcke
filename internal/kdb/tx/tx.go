@@ -77,11 +77,15 @@ func (tx *WriteTx) Put(key, value []byte) error {
 		return ErrTxClosed
 	}
 
+	checkCrashHook("tx-pre-wal-insert")
+
 	// WAL: log the insert.
 	payload := encodeKV(key, value)
 	if _, err := tx.wal.Append(wal.TypeInsert, payload); err != nil {
 		return err
 	}
+
+	checkCrashHook("tx-post-wal-insert")
 
 	return tx.tree.Put(key, value)
 }
@@ -92,10 +96,14 @@ func (tx *WriteTx) Delete(key []byte) error {
 		return ErrTxClosed
 	}
 
+	checkCrashHook("tx-pre-wal-delete")
+
 	// WAL: log the delete.
 	if _, err := tx.wal.Append(wal.TypeDelete, key); err != nil {
 		return err
 	}
+
+	checkCrashHook("tx-post-wal-delete")
 
 	return tx.tree.Delete(key)
 }
@@ -107,15 +115,22 @@ func (tx *WriteTx) Commit() error {
 		return ErrTxClosed
 	}
 
+	checkCrashHook("tx-pre-wal-commit")
+
 	// WAL commit marker.
 	if _, err := tx.wal.Append(wal.TypeCommit, nil); err != nil {
 		return err
 	}
 
+	checkCrashHook("tx-post-wal-commit")
+	checkCrashHook("tx-pre-flush")
+
 	// Flush all dirty pages to disk.
 	if err := tx.pool.FlushDirty(); err != nil {
 		return err
 	}
+
+	checkCrashHook("tx-post-flush")
 
 	tx.committed = true
 	tx.closed = true

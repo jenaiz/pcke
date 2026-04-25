@@ -328,14 +328,58 @@ func (db *DB) wireSubsystems() error {
 		return err
 	}
 
-	// Create the main B+tree (root = 0 for a new DB, will be set by replay/usage).
-	// The B+tree root is not stored in meta yet in Phase 0; it starts empty.
-	db.tree = btree.New(0, db.pool, db.fl)
+	// Create the main B+tree, using the root from meta if available.
+	// TreeRoot is 0 for a brand-new database; on subsequent opens it holds
+	// the committed root from the last successful meta swap.
+	db.tree = btree.New(m.TreeRoot, db.pool, db.fl)
 
-	// Replay WAL to recover any committed transactions.
+	// Replay WAL to recover any in-flight transactions since the last commit.
 	if err := db.replayWAL(); err != nil {
 		_ = w.Close()
 		return fmt.Errorf("kdb: replay wal: %w", err)
+	}
+
+	// After successful replay, persist the recovered state and truncate the WAL.
+	// This ensures: (a) the tree root is up-to-date in meta, (b) the WAL doesn't
+	// grow unboundedly, and (c) no stale records are replayed on the next open.
+	if err := db.postReplayCommit(); err != nil {
+		_ = w.Close()
+		return fmt.Errorf("kdb: post-replay commit: %w", err)
+	}
+
+	return nil
+}
+
+// postReplayCommit flushes the tree state after WAL replay and truncates the WAL.
+func (db *DB) postReplayCommit() error {
+	// Flush any dirty pages from replay.
+	if err := db.pool.FlushDirty(); err != nil {
+		return fmt.Errorf("flush after replay: %w", err)
+	}
+
+	// Write meta with the current tree root.
+	info, err := db.file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat for post-replay meta: %w", err)
+	}
+
+	newMeta := &Meta{
+		Version:        MetaVersion,
+		Generation:     db.meta.Generation + 1,
+		PageCount:      uint64(info.Size() / pageSize), //nolint:gosec // G115
+		FreelistRoot:   db.fl.Root(),
+		FreelistFormat: FreelistBTree,
+		TreeRoot:       db.tree.Root(),
+	}
+
+	if err := swapMeta(db.file, newMeta); err != nil {
+		return fmt.Errorf("swap meta after replay: %w", err)
+	}
+	db.meta = newMeta
+
+	// Truncate WAL — all data is safely in the tree + meta.
+	if err := db.wal.Truncate(); err != nil {
+		return fmt.Errorf("truncate wal: %w", err)
 	}
 
 	return nil
@@ -367,6 +411,7 @@ func (db *DB) persistMigration(m *Meta) error {
 		PageCount:      m.PageCount,
 		FreelistRoot:   db.fl.Root(),
 		FreelistFormat: FreelistBTree,
+		TreeRoot:       0, // No tree yet during migration.
 	}
 	if err := swapMeta(db.file, newMeta); err != nil {
 		return fmt.Errorf("kdb: swap meta after migration: %w", err)
@@ -510,6 +555,8 @@ func (db *DB) commitMeta() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	checkCrashHook("db-pre-meta-swap")
+
 	info, err := db.file.Stat()
 	if err != nil {
 		return fmt.Errorf("kdb: stat for meta: %w", err)
@@ -521,6 +568,7 @@ func (db *DB) commitMeta() error {
 		PageCount:      uint64(info.Size() / pageSize), //nolint:gosec // G115: file size is always positive.
 		FreelistRoot:   db.fl.Root(),
 		FreelistFormat: FreelistBTree,
+		TreeRoot:       db.tree.Root(),
 	}
 
 	if err := swapMeta(db.file, newMeta); err != nil {
@@ -528,14 +576,18 @@ func (db *DB) commitMeta() error {
 	}
 	db.meta = newMeta
 
+	checkCrashHook("db-post-meta-swap")
+
 	return nil
 }
 
 // replayWAL replays committed WAL records to restore the B+tree state.
 func (db *DB) replayWAL() error {
+	checkCrashHook("db-pre-wal-replay")
+
 	committed := false
 
-	return db.wal.Replay(func(rec wal.Record) error {
+	err := db.wal.Replay(func(rec wal.Record) error {
 		switch rec.Type {
 		case wal.TypeInsert:
 			key, value := tx.DecodeKV(rec.Payload)
@@ -556,4 +608,11 @@ func (db *DB) replayWAL() error {
 		_ = committed // consumed by future checkpoint logic
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	checkCrashHook("db-post-wal-replay")
+
+	return nil
 }

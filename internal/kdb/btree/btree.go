@@ -180,6 +180,8 @@ func (t *Tree) Put(key, value []byte) error {
 		return ErrKeyTooLarge
 	}
 
+	checkCrashHook("btree-pre-put")
+
 	// Create root leaf if empty.
 	if t.root == 0 {
 		rootID, err := t.allocPage()
@@ -218,6 +220,8 @@ func (t *Tree) Put(key, value []byte) error {
 		t.root = newRootID
 	}
 
+	checkCrashHook("btree-post-put")
+
 	return nil
 }
 
@@ -230,6 +234,8 @@ func (t *Tree) Delete(key []byte) error {
 	if t.root == 0 {
 		return ErrKeyNotFound
 	}
+
+	checkCrashHook("btree-pre-delete")
 
 	return t.delete(t.root, key)
 }

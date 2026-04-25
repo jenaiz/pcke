@@ -50,6 +50,8 @@ const (
 	metaOffPageCount      = metaOffGeneration + 8
 	metaOffFreelistRoot   = metaOffPageCount + 8
 	metaOffFreelistFormat = metaOffFreelistRoot + 8
+	metaOffReserved       = metaOffFreelistFormat + 1
+	metaOffTreeRoot       = metaOffReserved + 3
 )
 
 // FreelistFormat indicates the freelist storage strategy.
@@ -69,6 +71,7 @@ type Meta struct {
 	PageCount      uint64
 	FreelistRoot   uint64
 	FreelistFormat FreelistFormat
+	TreeRoot       uint64
 }
 
 // encodeMeta writes m into a 4096-byte page buffer as a TypeMeta page with
@@ -81,6 +84,7 @@ func encodeMeta(buf []byte, m *Meta) {
 	encoding.PutUint64(buf[metaOffPageCount:], m.PageCount)
 	encoding.PutUint64(buf[metaOffFreelistRoot:], m.FreelistRoot)
 	buf[metaOffFreelistFormat] = byte(m.FreelistFormat)
+	encoding.PutUint64(buf[metaOffTreeRoot:], m.TreeRoot)
 
 	// Recompute checksum after writing payload.
 	page.SetChecksum(buf)
@@ -103,6 +107,7 @@ func decodeMeta(buf []byte) (*Meta, error) {
 		PageCount:      encoding.Uint64(buf[metaOffPageCount:]),
 		FreelistRoot:   encoding.Uint64(buf[metaOffFreelistRoot:]),
 		FreelistFormat: FreelistFormat(buf[metaOffFreelistFormat]),
+		TreeRoot:       encoding.Uint64(buf[metaOffTreeRoot:]),
 	}, nil
 }
 
@@ -126,9 +131,13 @@ func writeMetaPage(f *os.File, slot int, buf []byte) error {
 		return fmt.Errorf("meta: write slot %d: %w", slot, err)
 	}
 
+	checkCrashHook("meta-post-write-pre-sync")
+
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("meta: fsync after write slot %d: %w", slot, err)
 	}
+
+	checkCrashHook("meta-post-sync")
 
 	return nil
 }
@@ -201,6 +210,8 @@ func initMeta(f *os.File, pageCount uint64) error {
 // After a successful swap, the newly written meta has the highest generation
 // and will be selected on the next loadMeta call.
 func swapMeta(f *os.File, m *Meta) error {
+	checkCrashHook("meta-pre-read-slots")
+
 	// Determine which slot is inactive (lower generation).
 	var gens [2]uint64
 	var valid [2]bool
@@ -233,6 +244,8 @@ func swapMeta(f *os.File, m *Meta) error {
 
 	buf := make([]byte, page.Size)
 	encodeMeta(buf, m)
+
+	checkCrashHook("meta-pre-write-inactive")
 
 	return writeMetaPage(f, targetSlot, buf)
 }
