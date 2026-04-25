@@ -302,15 +302,147 @@ func TestUnsupportedExtension(t *testing.T) {
 	}
 }
 
+func TestParseJavaEntities(t *testing.T) {
+	src := []byte(`package com.example;
+
+import java.util.List;
+import static java.util.Collections.emptyList;
+
+/** Server handles HTTP requests. */
+public class Server {
+    private final String host;
+
+    public static final int DEFAULT_PORT = 8080;
+
+    public Server(String host) {
+        this.host = host;
+    }
+
+    public void start() {
+        System.out.println("started");
+    }
+
+    private void helper() {}
+
+    public static class Builder {
+        public Builder withHost(String h) { return this; }
+    }
+}
+
+public interface Handler {
+    void handle(Request req);
+}
+
+public enum Status {
+    ACTIVE, INACTIVE, PENDING
+}
+
+public @interface Validated {
+    String value() default "";
+}
+`)
+
+	p := ast.NewParser()
+	defer p.Close()
+
+	result, err := p.ParseBytes(context.Background(), src, ast.LangJava)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	assertJavaEntities(t, result)
+	assertJavaImports(t, result)
+}
+
+func assertJavaEntities(t *testing.T, result *ast.ParseResult) {
+	t.Helper()
+	if result.Language != "Java" {
+		t.Errorf("language = %q, want Java", result.Language)
+	}
+
+	wantEntities := []struct {
+		kind     ast.EntityKind
+		name     string
+		exported bool
+	}{
+		{ast.KindClass, "Server", true},
+		{ast.KindConstant, "DEFAULT_PORT", true},
+		{ast.KindMethod, "Server", true},        // constructor
+		{ast.KindMethod, "start", true},         // public method
+		{ast.KindMethod, "helper", false},       // private method
+		{ast.KindClass, "Server.Builder", true}, // inner class
+		{ast.KindMethod, "withHost", true},      // inner class method
+		{ast.KindInterface, "Handler", true},
+		{ast.KindMethod, "handle", false}, // interface method (no public modifier)
+		{ast.KindEnum, "Status", true},
+		{ast.KindAnnotation, "Validated", true},
+	}
+
+	if len(result.Entities) != len(wantEntities) {
+		t.Fatalf("got %d entities, want %d:\n%v",
+			len(result.Entities), len(wantEntities), entityNames(result.Entities))
+	}
+
+	for i, want := range wantEntities {
+		got := result.Entities[i]
+		if got.Kind != want.kind || got.Name != want.name || got.Exported != want.exported {
+			t.Errorf("entity[%d] = {%s %q exported=%v}, want {%s %q exported=%v}",
+				i, got.Kind, got.Name, got.Exported, want.kind, want.name, want.exported)
+		}
+	}
+
+	// Check method receivers.
+	startMethod := findEntity(result.Entities, "start")
+	if startMethod == nil || startMethod.Receiver != "Server" {
+		t.Errorf("start receiver = %q, want Server", safeReceiver(startMethod))
+	}
+
+	handleMethod := findEntity(result.Entities, "handle")
+	if handleMethod == nil || handleMethod.Receiver != "Handler" {
+		t.Errorf("handle receiver = %q, want Handler", safeReceiver(handleMethod))
+	}
+
+	// Check doc comment.
+	server := findEntity(result.Entities, "Server")
+	if server == nil || server.Doc == "" {
+		t.Error("Server should have a doc comment")
+	}
+}
+
+func assertJavaImports(t *testing.T, result *ast.ParseResult) {
+	t.Helper()
+	if len(result.Imports) != 2 {
+		t.Fatalf("got %d imports, want 2:\n%v", len(result.Imports), result.Imports)
+	}
+	if result.Imports[0].Path != "java.util.List" {
+		t.Errorf("import[0] = %q, want java.util.List", result.Imports[0].Path)
+	}
+	if result.Imports[0].Alias != "" {
+		t.Errorf("import[0].Alias = %q, want empty", result.Imports[0].Alias)
+	}
+	if result.Imports[1].Path != "java.util.Collections.emptyList" {
+		t.Errorf("import[1] = %q, want java.util.Collections.emptyList", result.Imports[1].Path)
+	}
+	if result.Imports[1].Alias != "static" {
+		t.Errorf("import[1].Alias = %q, want static", result.Imports[1].Alias)
+	}
+}
+
+func TestParseJavaFileExtension(t *testing.T) {
+	if !ast.IsSupported(".java") {
+		t.Fatal("IsSupported(.java) = false, want true")
+	}
+}
+
 func TestIsSupported(t *testing.T) {
-	supported := []string{".go", ".py", ".js", ".ts", ".tsx", ".jsx"}
+	supported := []string{".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".java"}
 	for _, ext := range supported {
 		if !ast.IsSupported(ext) {
 			t.Errorf("IsSupported(%q) = false, want true", ext)
 		}
 	}
 
-	unsupported := []string{".rb", ".java", ".rs", ".c", ""}
+	unsupported := []string{".rb", ".rs", ".c", ""}
 	for _, ext := range unsupported {
 		if ast.IsSupported(ext) {
 			t.Errorf("IsSupported(%q) = true, want false", ext)

@@ -1,5 +1,5 @@
 // Package ast provides tree-sitter powered AST analysis for source code
-// entity extraction. It supports Go, Python, JavaScript, and TypeScript.
+// entity extraction. It supports Go, Python, JavaScript, TypeScript, and Java.
 //
 // This is the F2.T3 deliverable: CGo integration + language bindings.
 // Downstream consumers (F2.T4 scan --deep) call [Parser.ParseFile] to
@@ -13,6 +13,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/javascript"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
@@ -23,12 +24,14 @@ type EntityKind string
 
 // Supported entity kinds.
 const (
-	KindFunction  EntityKind = "function"
-	KindMethod    EntityKind = "method"
-	KindStruct    EntityKind = "struct"
-	KindInterface EntityKind = "interface"
-	KindClass     EntityKind = "class"
-	KindConstant  EntityKind = "constant"
+	KindFunction   EntityKind = "function"
+	KindMethod     EntityKind = "method"
+	KindStruct     EntityKind = "struct"
+	KindInterface  EntityKind = "interface"
+	KindClass      EntityKind = "class"
+	KindConstant   EntityKind = "constant"
+	KindEnum       EntityKind = "enum"
+	KindAnnotation EntityKind = "annotation"
 )
 
 // Entity represents a single code entity extracted from AST analysis.
@@ -65,6 +68,7 @@ const (
 	LangPython          // Python
 	LangJavaScript      // JavaScript
 	LangTypeScript      // TypeScript
+	LangJava            // Java
 )
 
 // langFromExt maps file extensions to Lang.
@@ -78,6 +82,8 @@ func langFromExt(ext string) Lang {
 		return LangJavaScript
 	case ".ts", ".tsx":
 		return LangTypeScript
+	case ".java":
+		return LangJava
 	default:
 		return LangUnknown
 	}
@@ -94,6 +100,8 @@ func langName(l Lang) string {
 		return "JavaScript"
 	case LangTypeScript:
 		return "TypeScript"
+	case LangJava:
+		return "Java"
 	default:
 		return "unknown"
 	}
@@ -110,6 +118,8 @@ func tsLang(l Lang) *sitter.Language {
 		return javascript.GetLanguage()
 	case LangTypeScript:
 		return typescript.GetLanguage()
+	case LangJava:
+		return java.GetLanguage()
 	default:
 		return nil
 	}
@@ -175,6 +185,9 @@ func (p *Parser) ParseBytes(ctx context.Context, src []byte, lang Lang) (*ParseR
 	case LangJavaScript, LangTypeScript:
 		result.Entities = extractJSEntities(root, src)
 		result.Imports = extractJSImports(root, src)
+	case LangJava:
+		result.Entities = extractJavaEntities(root, src)
+		result.Imports = extractJavaImports(root, src)
 	}
 
 	return result, nil
@@ -182,7 +195,7 @@ func (p *Parser) ParseBytes(ctx context.Context, src []byte, lang Lang) (*ParseR
 
 // Supported returns the list of supported file extensions.
 func Supported() []string {
-	return []string{".go", ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
+	return []string{".go", ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".java"}
 }
 
 // IsSupported returns true if the file extension is supported for AST analysis.

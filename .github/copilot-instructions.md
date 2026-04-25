@@ -22,3 +22,8 @@ handle is **jenaiz**.
 - Conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `chore:`.
 - Lint config: `.golangci.yml` **v2 format** (8 linters + gofumpt formatter, gocyclo ≤ 15).
 - Build tags: `kdbdebug` for assertions/crash hooks (never in releases).
+
+## Git credentials
+- use always the user jenaiz for git operations, never use jesusnavarrete or glb-jesus
+- use the email jesus.navarrete@gmail.com por git operations, never use other email in this repository
+- all commits must be signed with the a associated email address, never use other email address for signing commits in this repository
