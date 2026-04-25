@@ -616,3 +616,10 @@ func (db *DB) replayWAL() error {
 
 	return nil
 }
+
+// TestSubsystems returns the internal buffer pool and freelist for use in
+// tests that need direct subsystem access (e.g., secondary index tests).
+// This method is intended for testing only.
+func (db *DB) TestSubsystems() (*bufpool.Pool, *freelist.BTreeFreelist) {
+	return db.pool, db.fl
+}
