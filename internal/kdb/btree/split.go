@@ -20,6 +20,8 @@ type internalCell struct {
 // splitLeaf splits a full leaf node and inserts the new key-value pair.
 // Returns the promoted key and the new right sibling page ID.
 func (t *Tree) splitLeaf(pageID uint64, key, val []byte, isOverflow bool) ([]byte, uint64, error) {
+	checkCrashHook("btree-pre-split-leaf")
+
 	frame, err := t.pool.Pin(pageID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("btree: pin leaf for split %d: %w", pageID, err)
@@ -113,6 +115,8 @@ func (t *Tree) splitLeaf(pageID uint64, key, val []byte, isOverflow bool) ([]byt
 //
 // Convention A: firstChild is the leftmost child, each cell stores (key, rightChild).
 func (t *Tree) splitInternal(pageID uint64, newKey []byte, newChild uint64) ([]byte, uint64, error) {
+	checkCrashHook("btree-pre-split-internal")
+
 	frame, err := t.pool.Pin(pageID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("btree: pin internal for split %d: %w", pageID, err)

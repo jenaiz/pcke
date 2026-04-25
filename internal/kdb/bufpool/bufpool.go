@@ -132,6 +132,9 @@ func (p *Pool) FlushDirty() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	checkCrashHook("bufpool-pre-flush")
+
+	flushed := 0
 	for _, f := range p.frames {
 		if !f.dirty {
 			continue
@@ -142,11 +145,20 @@ func (p *Pool) FlushDirty() error {
 			return fmt.Errorf("bufpool: flush page %d: %w", f.PageID, err)
 		}
 		f.dirty = false
+		flushed++
+
+		if flushed == 1 {
+			checkCrashHook("bufpool-mid-flush")
+		}
 	}
+
+	checkCrashHook("bufpool-post-flush-pre-sync")
 
 	if err := p.io.Sync(); err != nil {
 		return fmt.Errorf("bufpool: sync: %w", err)
 	}
+
+	checkCrashHook("bufpool-post-flush-sync")
 
 	return nil
 }

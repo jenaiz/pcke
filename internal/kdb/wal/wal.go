@@ -135,13 +135,19 @@ func (w *WAL) Append(rt RecordType, payload []byte) (uint64, error) {
 	lsn := w.nextLSN
 	buf := encodeRecord(lsn, rt, payload)
 
+	checkCrashHook("wal-pre-write")
+
 	if _, err := w.file.Write(buf); err != nil {
 		return 0, fmt.Errorf("wal: write: %w", err)
 	}
 
+	checkCrashHook("wal-post-write-pre-sync")
+
 	if err := durableSync(w.file); err != nil {
 		return 0, fmt.Errorf("wal: sync: %w", err)
 	}
+
+	checkCrashHook("wal-post-sync")
 
 	w.nextLSN++
 	return lsn, nil
@@ -184,6 +190,51 @@ func (w *WAL) Close() error {
 	}
 
 	return w.file.Close()
+}
+
+// FileSize returns the current size of the WAL file in bytes.
+func (w *WAL) FileSize() (int64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return 0, ErrClosed
+	}
+
+	info, err := w.file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("wal: stat: %w", err)
+	}
+
+	return info.Size(), nil
+}
+
+// Truncate removes all records from the WAL file and resets the file to empty.
+// This is called after a successful WAL replay to prevent unbounded growth
+// and avoid replaying already-recovered records on subsequent opens.
+func (w *WAL) Truncate() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return ErrClosed
+	}
+
+	if err := w.file.Truncate(0); err != nil {
+		return fmt.Errorf("wal: truncate: %w", err)
+	}
+
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("wal: seek after truncate: %w", err)
+	}
+
+	if err := durableSync(w.file); err != nil {
+		return fmt.Errorf("wal: sync after truncate: %w", err)
+	}
+
+	w.nextLSN = 1
+
+	return nil
 }
 
 // scanAndRepair reads the WAL to find the highest valid LSN and truncates
