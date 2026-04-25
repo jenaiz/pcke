@@ -19,9 +19,15 @@ import (
 
 	"github.com/jenaiz/pcke/internal/kdb/bufpool"
 	"github.com/jenaiz/pcke/internal/kdb/encoding"
-	"github.com/jenaiz/pcke/internal/kdb/freelist"
 	"github.com/jenaiz/pcke/internal/kdb/page"
 )
+
+// Allocator abstracts page allocation for the B+tree. Both the bootstrap
+// linked-list freelist and the B+tree-based freelist implement this interface.
+type Allocator interface {
+	Alloc() (uint64, error)
+	Free(pageID uint64) error
+}
 
 // Sentinel errors.
 var (
@@ -103,13 +109,13 @@ const (
 type Tree struct {
 	root  uint64
 	pool  *bufpool.Pool
-	fl    *freelist.Freelist
+	fl    Allocator
 	count int64 // total key count (approximate, updated on put/delete)
 }
 
 // New creates a new Tree with the given root page ID. If root is 0, the tree
 // is empty and a root leaf will be created on the first Put.
-func New(root uint64, pool *bufpool.Pool, fl *freelist.Freelist) *Tree {
+func New(root uint64, pool *bufpool.Pool, fl Allocator) *Tree {
 	return &Tree{
 		root: root,
 		pool: pool,
