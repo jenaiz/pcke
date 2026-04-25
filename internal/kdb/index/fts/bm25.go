@@ -50,12 +50,16 @@ func (idx *Index) ScoreBM25(queryTerms []string) []BM25Result {
 	avgdl := float64(totalLen) / float64(totalDocs)
 	n := float64(totalDocs)
 
-	// Collect norms for all docs.
-	norms := make(map[uint64]uint32)
-	for _, seg := range segs {
-		for docID, norm := range seg.Norms {
-			norms[docID] = norm
+	// lookupNorm finds the document length for a given docID by scanning
+	// segments. This avoids copying all norms into a temporary map on every
+	// query — only docs that match a query term are looked up.
+	lookupNorm := func(docID uint64) uint32 {
+		for _, seg := range segs {
+			if norm, ok := seg.Norms[docID]; ok {
+				return norm
+			}
 		}
+		return 0
 	}
 
 	// Score accumulator per document.
@@ -82,7 +86,7 @@ func (idx *Index) ScoreBM25(queryTerms []string) []BM25Result {
 		// Score each document.
 		for _, p := range termPostings {
 			tf := float64(p.Freq)
-			dl := float64(norms[p.DocID])
+			dl := float64(lookupNorm(p.DocID))
 			num := tf * (bm25K1 + 1)
 			denom := tf + bm25K1*(1-bm25B+bm25B*dl/avgdl)
 			scores[p.DocID] += idf * num / denom
