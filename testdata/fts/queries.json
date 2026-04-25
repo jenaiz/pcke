@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "description": "Manual Precision@5 corpus for Phase 1 FTS evaluation (20 queries).",
+  "queries": [
+    {
+      "id": "q01",
+      "text": "error handling strategy",
+      "relevant_doc_ids": ["doc:error-handling", "doc:error-propagation", "doc:sentinel-errors", "doc:fmt-errorf-wrapping", "doc:recovery-patterns"],
+      "tags": ["error-handling", "go-patterns"]
+    },
+    {
+      "id": "q02",
+      "text": "B+tree split algorithm",
+      "relevant_doc_ids": ["doc:btree-split", "doc:btree-node-format", "doc:btree-overflow", "doc:btree-internal-split", "doc:page-layout"],
+      "tags": ["btree", "storage"]
+    },
+    {
+      "id": "q03",
+      "text": "WAL write-ahead log replay",
+      "relevant_doc_ids": ["doc:wal-replay", "doc:wal-record-format", "doc:wal-append", "doc:recovery-open", "doc:crash-recovery"],
+      "tags": ["wal", "recovery"]
+    },
+    {
+      "id": "q04",
+      "text": "transaction isolation level",
+      "relevant_doc_ids": ["doc:tx-view", "doc:tx-update", "doc:snapshot-isolation", "doc:rwmutex-global", "doc:meta-swap"],
+      "tags": ["transactions", "concurrency"]
+    },
+    {
+      "id": "q05",
+      "text": "buffer pool eviction policy",
+      "relevant_doc_ids": ["doc:bufpool-eviction", "doc:bufpool-pin-unpin", "doc:bufpool-dirty-tracking", "doc:clock-sweep", "doc:page-replacement"],
+      "tags": ["bufpool", "memory"]
+    },
+    {
+      "id": "q06",
+      "text": "file locking mechanism",
+      "relevant_doc_ids": ["doc:lock-flock", "doc:lock-pid-file", "doc:lock-unix", "doc:lock-windows", "doc:exclusive-access"],
+      "tags": ["locking", "os"]
+    },
+    {
+      "id": "q07",
+      "text": "CRC32C integrity verification",
+      "relevant_doc_ids": ["doc:crc32c-page", "doc:crc32c-encoding", "doc:page-header-verify", "doc:data-integrity", "doc:checksum-validation"],
+      "tags": ["encoding", "integrity"]
+    },
+    {
+      "id": "q08",
+      "text": "freelist page allocation",
+      "relevant_doc_ids": ["doc:freelist-alloc", "doc:freelist-free", "doc:freelist-btree-migration", "doc:freelist-linked-list", "doc:page-growth"],
+      "tags": ["freelist", "storage"]
+    },
+    {
+      "id": "q09",
+      "text": "camelCase identifier tokenization",
+      "relevant_doc_ids": ["doc:tokenizer-camelcase", "doc:tokenizer-word-boundary", "doc:tokenizer-snake-case", "doc:fts-tokenizer", "doc:identifier-splitting"],
+      "tags": ["fts", "tokenizer"]
+    },
+    {
+      "id": "q10",
+      "text": "secondary index by module",
+      "relevant_doc_ids": ["doc:index-by-module", "doc:index-by-tag", "doc:index-encoding", "doc:secondary-index", "doc:btree-index"],
+      "tags": ["index", "query"]
+    },
+    {
+      "id": "q11",
+      "text": "crash recovery invariants",
+      "relevant_doc_ids": ["doc:crash-recovery", "doc:invariant-crc", "doc:invariant-meta-consistency", "doc:invariant-wal-replay", "doc:crashsim-harness"],
+      "tags": ["recovery", "testing"]
+    },
+    {
+      "id": "q12",
+      "text": "double meta page atomic swap",
+      "relevant_doc_ids": ["doc:meta-double", "doc:meta-swap", "doc:meta-active", "doc:meta-lsn", "doc:atomic-commit"],
+      "tags": ["meta", "durability"]
+    },
+    {
+      "id": "q13",
+      "text": "varint encoding format",
+      "relevant_doc_ids": ["doc:varint-encode", "doc:varint-decode", "doc:encoding-record", "doc:encoding-endian", "doc:encoding-schema-v1"],
+      "tags": ["encoding", "format"]
+    },
+    {
+      "id": "q14",
+      "text": "git repository analysis scanner",
+      "relevant_doc_ids": ["doc:analysis-scanner", "doc:analysis-git", "doc:analysis-heuristics", "doc:scan-command", "doc:file-tree-walk"],
+      "tags": ["analysis", "scanner"]
+    },
+    {
+      "id": "q15",
+      "text": "secret detection patterns",
+      "relevant_doc_ids": ["doc:secrets-detection", "doc:secrets-aws", "doc:secrets-patterns", "doc:analysis-security", "doc:heuristics-secrets"],
+      "tags": ["secrets", "security"]
+    },
+    {
+      "id": "q16",
+      "text": "markdown output context generation",
+      "relevant_doc_ids": ["doc:output-render", "doc:output-architecture", "doc:output-modules", "doc:output-conventions", "doc:output-agents"],
+      "tags": ["output", "markdown"]
+    },
+    {
+      "id": "q17",
+      "text": "BM25 relevance scoring",
+      "relevant_doc_ids": ["doc:bm25-scorer", "doc:bm25-parameters", "doc:bm25-idf", "doc:bm25-tf", "doc:fts-ranking"],
+      "tags": ["fts", "scoring"]
+    },
+    {
+      "id": "q18",
+      "text": "checkpoint dirty page flush",
+      "relevant_doc_ids": ["doc:checkpoint-flush", "doc:checkpoint-dirty-table", "doc:checkpoint-wal-rotation", "doc:checkpoint-meta-update", "doc:fuzzy-checkpoint"],
+      "tags": ["checkpoint", "durability"]
+    },
+    {
+      "id": "q19",
+      "text": "posting list delta compression",
+      "relevant_doc_ids": ["doc:posting-encoding", "doc:posting-delta", "doc:posting-gamma", "doc:posting-varint", "doc:fts-segment"],
+      "tags": ["fts", "encoding"]
+    },
+    {
+      "id": "q20",
+      "text": "configuration TOML parsing",
+      "relevant_doc_ids": ["doc:config-toml", "doc:config-defaults", "doc:config-validation", "doc:config-paths", "doc:cli-config"],
+      "tags": ["config", "cli"]
+    }
+  ],
+  "doc_corpus": {
+    "description": "Document IDs are synthetic placeholders. During Phase 1, the harness (F1.T12) will populate the DB with actual documents matching these IDs and verify that search results rank the relevant docs in the top 5.",
+    "generation_note": "The actual document content must be created alongside the harness to ensure meaningful BM25 scoring. Each doc ID maps to a document that contains text relevant to its query."
+  }
+}

@@ -240,8 +240,8 @@ func runBTreeRandomStep(
 			return
 		}
 	} else {
-		// Free a new page.
-		newID := uint64(50000) + uint64(rng.IntN(100_000)) //nolint:gosec // G115: test code.
+		// Free a new page (avoid reserve range 100000..100099).
+		newID := uint64(50000) + uint64(rng.IntN(50_000)) //nolint:gosec // G115: test code.
 		if !allocated[newID] && !inFreeList[newID] {
 			if err := fl.Free(newID); err != nil {
 				t.Fatalf("step %d: Free(%d): %v", step, newID, err)

@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/index/fts"
+	"github.com/jenaiz/pcke/internal/kdb/query"
+	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/output"
 )
 
@@ -214,6 +218,67 @@ func newConfigCmd() *cobra.Command {
 			},
 		},
 	)
+
+	return cmd
+}
+
+func newRecallCmd() *cobra.Command {
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "recall [query]",
+		Short: "Search the knowledge base using full-text search",
+		Long: `Search the knowledge base for nodes matching a natural language query.
+Results are ranked using BM25 relevance scoring.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			queryStr := strings.Join(args, " ")
+
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("recall: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("recall: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			// Build FTS index from the DB.
+			idx := fts.NewIndex()
+			if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+				c := rtx.Cursor()
+				if !c.First() {
+					return nil
+				}
+				for c.Valid() {
+					idx.AddDocument(string(c.Value()))
+					c.Next()
+				}
+				return nil
+			}); err != nil {
+				return fmt.Errorf("recall: index documents: %w", err)
+			}
+			idx.Commit()
+
+			planner := query.NewPlanner(idx)
+			results := planner.Search(queryStr, limit)
+
+			if len(results) == 0 {
+				fmt.Println("No results found.")
+				return nil
+			}
+
+			for i, r := range results {
+				fmt.Printf("%d. [doc:%d] score=%.4f\n", i+1, r.DocID, r.Score)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of results to return")
 
 	return cmd
 }

@@ -264,7 +264,7 @@ func (t *Tree) Put(key, value []byte) error {
 }
 
 // Delete removes a key from the tree. Returns ErrKeyNotFound if the key does
-// not exist. Merges/redistribution are deferred to Phase 1.
+// not exist. Underflowing nodes are rebalanced via redistribution or merging.
 func (t *Tree) Delete(key []byte) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
@@ -275,7 +275,13 @@ func (t *Tree) Delete(key []byte) error {
 
 	checkCrashHook("btree-pre-delete")
 
-	return t.delete(t.root, key)
+	_, err := t.delete(t.root, key)
+	if err != nil {
+		return err
+	}
+
+	// If the root is an internal node with no keys, collapse it.
+	return t.collapseRoot()
 }
 
 // insert recursively inserts into the subtree rooted at pageID.
@@ -392,10 +398,11 @@ func (t *Tree) insertInternal(pageID uint64, key, value []byte) ([]byte, uint64,
 }
 
 // delete recursively deletes a key from the subtree rooted at pageID.
-func (t *Tree) delete(pageID uint64, key []byte) error {
+// Returns true if the node is now underflowing.
+func (t *Tree) delete(pageID uint64, key []byte) (bool, error) {
 	frame, err := t.pool.Pin(pageID)
 	if err != nil {
-		return fmt.Errorf("btree: pin %d: %w", pageID, err)
+		return false, fmt.Errorf("btree: pin %d: %w", pageID, err)
 	}
 
 	pt := page.GetType(frame.Buf)
@@ -407,28 +414,29 @@ func (t *Tree) delete(pageID uint64, key []byte) error {
 	case page.TypeInternal:
 		return t.deleteInternal(pageID, key)
 	default:
-		return fmt.Errorf("btree: unexpected page type %s at page %d", pt, pageID)
+		return false, fmt.Errorf("btree: unexpected page type %s at page %d", pt, pageID)
 	}
 }
 
 // deleteLeaf removes a key from a leaf node.
-func (t *Tree) deleteLeaf(pageID uint64, key []byte) error {
+// Returns true if the leaf is now underflowing.
+func (t *Tree) deleteLeaf(pageID uint64, key []byte) (bool, error) {
 	frame, err := t.pool.Pin(pageID)
 	if err != nil {
-		return fmt.Errorf("btree: pin leaf %d: %w", pageID, err)
+		return false, fmt.Errorf("btree: pin leaf %d: %w", pageID, err)
 	}
 	defer t.pool.Unpin(pageID)
 
 	idx, found := leafSearch(frame.Buf, key)
 	if !found {
-		return ErrKeyNotFound
+		return false, ErrKeyNotFound
 	}
 
 	// Free overflow if present.
 	_, isOverflow, overflowID := leafCellValue(frame.Buf, idx)
 	if isOverflow {
 		if err := t.freeOverflow(overflowID); err != nil {
-			return err
+			return false, err
 		}
 	}
 
@@ -436,21 +444,51 @@ func (t *Tree) deleteLeaf(pageID uint64, key []byte) error {
 	t.pool.MarkDirty(pageID)
 	t.count--
 
-	return nil
+	// Don't report underflow if this is the root (root can be sparse).
+	if pageID == t.root {
+		return false, nil
+	}
+
+	return leafUnderflow(frame.Buf), nil
 }
 
-// deleteInternal routes delete to the appropriate child.
-func (t *Tree) deleteInternal(pageID uint64, key []byte) error {
+// deleteInternal routes delete to the appropriate child and handles
+// rebalancing if the child underflows after the deletion.
+func (t *Tree) deleteInternal(pageID uint64, key []byte) (bool, error) {
 	frame, err := t.pool.Pin(pageID)
 	if err != nil {
-		return fmt.Errorf("btree: pin internal %d: %w", pageID, err)
+		return false, fmt.Errorf("btree: pin internal %d: %w", pageID, err)
 	}
 
 	childIdx := internalSearch(frame.Buf, key)
 	childID := internalChildAt(frame.Buf, childIdx)
 	t.pool.Unpin(pageID)
 
-	return t.delete(childID, key)
+	childUnderflow, err := t.delete(childID, key)
+	if err != nil {
+		return false, err
+	}
+
+	if !childUnderflow {
+		return false, nil
+	}
+
+	// Child is underflowing. Determine child type to dispatch rebalancing.
+	cFrame, err := t.pool.Pin(childID)
+	if err != nil {
+		return false, fmt.Errorf("btree: pin child %d: %w", childID, err)
+	}
+	childType := page.GetType(cFrame.Buf)
+	t.pool.Unpin(childID)
+
+	switch childType {
+	case page.TypeLeaf:
+		return t.rebalanceLeaf(pageID, childIdx)
+	case page.TypeInternal:
+		return t.rebalanceInternal(pageID, childIdx)
+	default:
+		return false, nil
+	}
 }
 
 // findLeaf traverses the tree from root to find the leaf page containing key.
@@ -674,7 +712,7 @@ func internalFirstChild(buf []byte) uint64 {
 
 // setInternalFirstChild sets the leftmost child page ID.
 //
-//nolint:unused // Will be used by T8 (freelist B+tree migration).
+//nolint:unused // utility for future use; merge.go uses initInternalNode instead.
 func setInternalFirstChild(buf []byte, id uint64) {
 	encoding.PutUint64(buf[offFirstChild:], id)
 }
@@ -796,8 +834,6 @@ func internalInsertCell(buf []byte, i int, key []byte, childPageID uint64) {
 }
 
 // internalDeleteCell removes the cell at index i.
-//
-//nolint:unused // Will be used by F1.T11 (merges/redistribution).
 func internalDeleteCell(buf []byte, i int) {
 	count := internalCount(buf)
 	cellOff := internalCellOffset(buf, i)

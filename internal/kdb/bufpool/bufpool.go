@@ -1,13 +1,18 @@
-// Package bufpool implements a minimal buffer pool for kdb.
+// Package bufpool implements a buffer pool with clock-sweep eviction for kdb.
 //
 // The buffer pool caches database pages in memory with pin/unpin reference
-// counting and dirty tracking. Pages are evicted only when unpinned and not
-// dirty (simple eviction without clock-sweep; clock-sweep is deferred to
-// Phase 1, F1.T1).
+// counting, dirty tracking, and clock-sweep (second-chance) eviction. A
+// hit rate metric tracks cache effectiveness — the target is ≥ 85% under
+// mixed workloads.
+//
+// Clock-sweep works by maintaining a circular scan ("clock hand") over all
+// frames. On eviction, the hand advances: frames that were recently accessed
+// have their referenced bit cleared (second chance); frames with a clear bit
+// are evicted. This approximates LRU with O(1) amortised bookkeeping.
 //
 // Concurrency: all public methods are safe for concurrent use.
 //
-// Phase 0 — Task T6.
+// Phase 0 — Task T6. Phase 1 — Task F1.T1 (clock-sweep + hit rate).
 package bufpool
 
 import (
@@ -33,15 +38,22 @@ type Frame struct {
 	Buf    []byte
 	dirty  bool
 	pinCnt int32
+	ref    bool // referenced bit for clock-sweep (second chance)
 }
 
-// Pool is a minimal buffer pool with pin/unpin and dirty tracking.
+// Pool is a buffer pool with clock-sweep eviction, pin/unpin, and dirty tracking.
+//
+// The hits and misses counters track cache effectiveness. Use [Pool.Stats]
+// to read the current hit rate.
 type Pool struct {
-	mu       sync.Mutex
-	io       PageIO
-	maxPages int
-	frames   map[uint64]*Frame // pageID → frame
-	order    []uint64          // insertion order for simple eviction
+	mu        sync.Mutex
+	io        PageIO
+	maxPages  int
+	frames    map[uint64]*Frame // pageID → frame
+	clock     []*Frame          // circular buffer for clock-sweep
+	clockHand int               // current position of the clock hand
+	hits      uint64            // cache hit counter
+	misses    uint64            // cache miss counter
 }
 
 // New creates a buffer pool with the given capacity (in pages) and I/O backend.
@@ -54,7 +66,7 @@ func New(pio PageIO, maxPages int) *Pool {
 		io:       pio,
 		maxPages: maxPages,
 		frames:   make(map[uint64]*Frame, maxPages),
-		order:    make([]uint64, 0, maxPages),
+		clock:    make([]*Frame, 0, maxPages),
 	}
 }
 
@@ -68,10 +80,15 @@ func (p *Pool) Pin(pageID uint64) (*Frame, error) {
 	// Cache hit.
 	if f, ok := p.frames[pageID]; ok {
 		f.pinCnt++
+		f.ref = true // mark referenced for clock-sweep
+		p.hits++
 		return f, nil
 	}
 
-	// Cache miss — need space.
+	// Cache miss.
+	p.misses++
+
+	// Need space — evict via clock-sweep.
 	if len(p.frames) >= p.maxPages {
 		if err := p.evictOne(); err != nil {
 			return nil, fmt.Errorf("bufpool: evict for page %d: %w", pageID, err)
@@ -88,9 +105,10 @@ func (p *Pool) Pin(pageID uint64) (*Frame, error) {
 		PageID: pageID,
 		Buf:    buf,
 		pinCnt: 1,
+		ref:    true,
 	}
 	p.frames[pageID] = f
-	p.order = append(p.order, pageID)
+	p.clock = append(p.clock, f)
 
 	return f, nil
 }
@@ -185,7 +203,7 @@ func (p *Pool) FlushPage(pageID uint64) error {
 	return nil
 }
 
-// Stats returns pool statistics.
+// Stats returns pool statistics including the cache hit rate.
 func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -193,6 +211,13 @@ func (p *Pool) Stats() PoolStats {
 	var s PoolStats
 	s.MaxPages = p.maxPages
 	s.CachedPages = len(p.frames)
+	s.Hits = p.hits
+	s.Misses = p.misses
+
+	total := p.hits + p.misses
+	if total > 0 {
+		s.HitRate = float64(p.hits) / float64(total)
+	}
 
 	for _, f := range p.frames {
 		if f.pinCnt > 0 {
@@ -212,6 +237,9 @@ type PoolStats struct {
 	CachedPages int
 	PinnedPages int
 	DirtyPages  int
+	Hits        uint64  // total cache hits
+	Misses      uint64  // total cache misses
+	HitRate     float64 // hits / (hits + misses); 0 if no accesses
 }
 
 // IsDirty reports whether the page is marked dirty in the pool.
@@ -236,27 +264,70 @@ func (p *Pool) Contains(pageID uint64) bool {
 	return ok
 }
 
-// evictOne removes one unpinned, non-dirty frame to make space.
+// evictOne uses clock-sweep (second-chance) to find and evict one frame.
+// The clock hand advances through the circular buffer. Frames with the
+// referenced bit set get a second chance (bit cleared); frames with a
+// clear bit and zero pin count are evicted.
+//
 // Caller must hold p.mu.
 func (p *Pool) evictOne() error {
-	for i, pgID := range p.order {
-		f := p.frames[pgID]
+	n := len(p.clock)
+	if n == 0 {
+		return fmt.Errorf("all %d pages are pinned, cannot evict", p.maxPages)
+	}
+
+	// We scan at most 2*n entries: first pass clears ref bits, second pass
+	// evicts. This guarantees termination if any frame is unpinned.
+	for range 2 * n {
+		f := p.clock[p.clockHand]
+
 		if f.pinCnt > 0 {
+			p.advanceHand()
 			continue
 		}
+
+		if f.ref {
+			f.ref = false // second chance
+			p.advanceHand()
+			continue
+		}
+
+		// Victim found. Flush if dirty.
 		if f.dirty {
-			// Flush before eviction.
 			page.SetChecksum(f.Buf)
 			if err := p.io.WritePage(f.PageID, f.Buf); err != nil {
-				return fmt.Errorf("flush dirty page %d: %w", pgID, err)
+				return fmt.Errorf("flush dirty page %d: %w", f.PageID, err)
 			}
 		}
 
-		delete(p.frames, pgID)
-		p.order = append(p.order[:i], p.order[i+1:]...)
+		// Remove from clock ring.
+		p.removeClock(p.clockHand)
+		delete(p.frames, f.PageID)
 
 		return nil
 	}
 
 	return fmt.Errorf("all %d pages are pinned, cannot evict", p.maxPages)
+}
+
+// advanceHand moves the clock hand forward, wrapping around.
+func (p *Pool) advanceHand() {
+	p.clockHand = (p.clockHand + 1) % len(p.clock)
+}
+
+// removeClock removes the frame at index i from the clock ring and adjusts
+// the clock hand so it does not skip entries.
+func (p *Pool) removeClock(i int) {
+	n := len(p.clock)
+	p.clock[i] = p.clock[n-1]
+	p.clock[n-1] = nil // avoid memory leak
+	p.clock = p.clock[:n-1]
+
+	if len(p.clock) == 0 {
+		p.clockHand = 0
+		return
+	}
+	// If we removed an entry at or before the hand, the hand now points to
+	// the replacement element (swapped from end). Modulo keeps it in range.
+	p.clockHand = p.clockHand % len(p.clock)
 }

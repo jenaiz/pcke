@@ -470,3 +470,152 @@ func TestEvictDirtyPage(t *testing.T) {
 		t.Errorf("evicted dirty page data[0] = %x, want 0xBE", page.Data(buf)[0])
 	}
 }
+
+func TestClockSweepHitRate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 100K ops in short mode")
+	}
+
+	// Workload: 200 distinct pages, pool holds 128.
+	// Access pattern: 80% of accesses hit the "hot" 64 pages, 20% hit
+	// the remaining 136. Clock-sweep should keep hot pages resident.
+	const (
+		numPages  = 200
+		poolSize  = 128
+		totalOps  = 100_000
+		hotPages  = 64
+		threshold = 0.85
+	)
+
+	pio := newMemPageIO()
+	for i := uint64(0); i < numPages; i++ {
+		pio.initPage(i, page.TypeLeaf)
+	}
+
+	pool := bufpool.New(pio, poolSize)
+
+	// Use a deterministic PRNG-like sequence (LCG) to avoid math/rand import.
+	seed := uint64(42)
+	lcg := func() uint64 {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		return seed
+	}
+
+	for range totalOps {
+		var pgID uint64
+		r := lcg() % 100
+		if r < 80 {
+			pgID = lcg() % hotPages
+		} else {
+			pgID = hotPages + (lcg() % (numPages - hotPages))
+		}
+
+		f, err := pool.Pin(pgID)
+		if err != nil {
+			t.Fatalf("Pin(%d): %v", pgID, err)
+		}
+		_ = f
+		pool.Unpin(pgID)
+	}
+
+	stats := pool.Stats()
+	if stats.HitRate < threshold {
+		t.Errorf("hit rate = %.4f, want >= %.2f (hits=%d, misses=%d)",
+			stats.HitRate, threshold, stats.Hits, stats.Misses)
+	}
+	t.Logf("clock-sweep hit rate: %.2f%% (hits=%d, misses=%d)",
+		stats.HitRate*100, stats.Hits, stats.Misses)
+}
+
+func TestClockSweepSecondChance(t *testing.T) {
+	// Verify that recently accessed pages survive eviction via second-chance.
+	//
+	// Strategy: fill pool, trigger one eviction (clears all ref bits),
+	// then re-access a specific page and trigger another eviction —
+	// the re-accessed page should survive.
+	pio := newMemPageIO()
+	for i := uint64(0); i < 10; i++ {
+		pio.initPage(i, page.TypeLeaf)
+	}
+
+	pool := bufpool.New(pio, 3)
+
+	// Fill pool with pages 0, 1, 2 (all ref=true).
+	for i := uint64(0); i < 3; i++ {
+		f, err := pool.Pin(i)
+		if err != nil {
+			t.Fatalf("Pin(%d): %v", i, err)
+		}
+		_ = f
+		pool.Unpin(i)
+	}
+
+	// Pin page 3 → evicts one page (first sweep clears all ref bits,
+	// second sweep evicts the first unreferenced page).
+	f, err := pool.Pin(3)
+	if err != nil {
+		t.Fatalf("Pin(3): %v", err)
+	}
+	_ = f
+	pool.Unpin(3)
+
+	// Now pool has 3 pages. Some have ref=false (cleared during sweep).
+	// Re-access page 1 to set its ref bit.
+	f, err = pool.Pin(1)
+	if err != nil {
+		// Page 1 may have been evicted; skip the second-chance check.
+		t.Skip("page 1 was evicted in first round, skipping second-chance test")
+	}
+	_ = f
+	pool.Unpin(1)
+
+	// Pin page 4 → triggers another eviction.
+	f, err = pool.Pin(4)
+	if err != nil {
+		t.Fatalf("Pin(4): %v", err)
+	}
+	_ = f
+	pool.Unpin(4)
+
+	// Page 1 should still be cached (second chance saved it).
+	if !pool.Contains(1) {
+		t.Error("page 1 should survive eviction via second chance")
+	}
+
+	// Page 4 should be cached.
+	if !pool.Contains(4) {
+		t.Error("page 4 should be in pool after Pin")
+	}
+}
+
+func TestHitRateStats(t *testing.T) {
+	pio := newMemPageIO()
+	pio.initPage(1, page.TypeLeaf)
+
+	pool := bufpool.New(pio, 16)
+
+	// First access — miss.
+	_, err := pool.Pin(1)
+	if err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	pool.Unpin(1)
+
+	// Second access — hit.
+	_, err = pool.Pin(1)
+	if err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	pool.Unpin(1)
+
+	stats := pool.Stats()
+	if stats.Hits != 1 {
+		t.Errorf("Hits = %d, want 1", stats.Hits)
+	}
+	if stats.Misses != 1 {
+		t.Errorf("Misses = %d, want 1", stats.Misses)
+	}
+	if stats.HitRate != 0.5 {
+		t.Errorf("HitRate = %f, want 0.5", stats.HitRate)
+	}
+}

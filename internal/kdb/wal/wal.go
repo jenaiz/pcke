@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/jenaiz/pcke/internal/kdb/encoding"
@@ -84,46 +85,98 @@ const (
 	// crcSize is the trailing CRC32C checksum.
 	crcSize = 4
 
-	// walFileName is the name of the WAL file in the .pcke directory.
-	walFileName = "wal.log"
+	// legacyWALFileName is the name of the old single-file WAL.
+	legacyWALFileName = "wal.log"
 
 	// filePerms is the permission mode for the WAL file.
 	filePerms = 0o600
 )
 
-// WAL is a write-ahead log backed by a single file.
+// WAL is a write-ahead log backed by numbered segment files.
+//
+// Each segment is named wal-XXXXXXXX.log. The WAL appends to the active
+// (highest-numbered) segment. On [WAL.Rotate], a new segment is created
+// and becomes the active one. [WAL.RemoveOlderSegments] deletes all
+// segments except the active one — used after checkpoint.
+//
+// Concurrency: all methods are safe for concurrent use via an internal mutex.
 type WAL struct {
-	mu      sync.Mutex
-	file    *os.File
-	nextLSN uint64
-	closed  bool
+	mu       sync.Mutex
+	dir      string
+	active   *os.File
+	activeID uint64   // segment number of the active file
+	segments []uint64 // all segment IDs, sorted ascending
+	nextLSN  uint64
+	closed   bool
 }
 
-// Open opens (or creates) a WAL file in the given directory. The directory
-// must already exist. If the WAL file contains data, the nextLSN is set to
-// one past the highest LSN found by scanning.
+// segmentName returns the filename for a given segment ID.
+func segmentName(id uint64) string {
+	return fmt.Sprintf("wal-%08d.log", id)
+}
+
+// Open opens (or creates) a WAL in the given directory. The directory
+// must already exist. If a legacy single-file WAL (wal.log) exists, it
+// is migrated to segment format (wal-00000001.log). If segments exist,
+// the highest-numbered segment becomes the active one and is scanned
+// to determine the next LSN.
 func Open(dir string) (*WAL, error) {
-	path := filepath.Join(dir, walFileName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, filePerms) //nolint:gosec // G304: path controlled by caller.
+	// Migrate legacy WAL if present.
+	if err := migrateLegacy(dir); err != nil {
+		return nil, err
+	}
+
+	// Discover existing segments.
+	segIDs, err := discoverSegments(dir)
 	if err != nil {
-		return nil, fmt.Errorf("wal: open %s: %w", path, err)
+		return nil, err
 	}
 
 	w := &WAL{
-		file:    f,
+		dir:     dir,
 		nextLSN: 1,
 	}
 
-	// Scan existing records to find next LSN and detect corrupt tail.
-	if err := w.scanAndRepair(); err != nil {
-		_ = f.Close()
+	if len(segIDs) == 0 {
+		// No segments — create the first one.
+		segIDs = []uint64{1}
+		f, err := createSegment(dir, 1)
+		if err != nil {
+			return nil, err
+		}
+		w.active = f
+		w.activeID = 1
+		w.segments = segIDs
+		return w, nil
+	}
+
+	w.segments = segIDs
+	w.activeID = segIDs[len(segIDs)-1]
+
+	// Scan all segments to find the highest LSN.
+	for _, id := range segIDs {
+		path := filepath.Join(dir, segmentName(id))
+		f, err := os.OpenFile(path, os.O_RDWR, filePerms) //nolint:gosec // G304: path constructed from dir.
+		if err != nil {
+			return nil, fmt.Errorf("wal: open segment %d: %w", id, err)
+		}
+		if id == w.activeID {
+			w.active = f
+		} else {
+			_ = f.Close()
+		}
+	}
+
+	// Scan and repair the active segment (corrupt tail detection).
+	if err := w.scanAllSegments(); err != nil {
+		_ = w.active.Close()
 		return nil, err
 	}
 
 	return w, nil
 }
 
-// Append writes a record to the WAL and fsyncs. Returns the assigned LSN.
+// Append writes a record to the active WAL segment and fsyncs. Returns the assigned LSN.
 func (w *WAL) Append(rt RecordType, payload []byte) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -137,13 +190,13 @@ func (w *WAL) Append(rt RecordType, payload []byte) (uint64, error) {
 
 	checkCrashHook("wal-pre-write")
 
-	if _, err := w.file.Write(buf); err != nil {
+	if _, err := w.active.Write(buf); err != nil {
 		return 0, fmt.Errorf("wal: write: %w", err)
 	}
 
 	checkCrashHook("wal-post-write-pre-sync")
 
-	if err := durableSync(w.file); err != nil {
+	if err := durableSync(w.active); err != nil {
 		return 0, fmt.Errorf("wal: sync: %w", err)
 	}
 
@@ -153,9 +206,9 @@ func (w *WAL) Append(rt RecordType, payload []byte) (uint64, error) {
 	return lsn, nil
 }
 
-// Replay reads all valid records from the WAL and calls fn for each one in
-// order. Replay is deterministic: given the same WAL file, it produces the
-// same sequence of records.
+// Replay reads all valid records from all WAL segments (oldest to newest)
+// and calls fn for each one in order. Replay is deterministic: given the
+// same WAL segments, it produces the same sequence of records.
 func (w *WAL) Replay(fn func(Record) error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -164,7 +217,12 @@ func (w *WAL) Replay(fn func(Record) error) error {
 		return ErrClosed
 	}
 
-	return replayFile(w.file, fn)
+	for _, id := range w.segments {
+		if err := w.replaySegment(id, fn); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // NextLSN returns the next LSN that will be assigned.
@@ -174,7 +232,7 @@ func (w *WAL) NextLSN() uint64 {
 	return w.nextLSN
 }
 
-// Close fsyncs and closes the WAL file.
+// Close fsyncs and closes the active WAL segment.
 func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -184,15 +242,15 @@ func (w *WAL) Close() error {
 	}
 	w.closed = true
 
-	if err := durableSync(w.file); err != nil {
-		_ = w.file.Close()
+	if err := durableSync(w.active); err != nil {
+		_ = w.active.Close()
 		return fmt.Errorf("wal: close sync: %w", err)
 	}
 
-	return w.file.Close()
+	return w.active.Close()
 }
 
-// FileSize returns the current size of the WAL file in bytes.
+// FileSize returns the total size of all WAL segment files in bytes.
 func (w *WAL) FileSize() (int64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -201,17 +259,21 @@ func (w *WAL) FileSize() (int64, error) {
 		return 0, ErrClosed
 	}
 
-	info, err := w.file.Stat()
-	if err != nil {
-		return 0, fmt.Errorf("wal: stat: %w", err)
+	var total int64
+	for _, id := range w.segments {
+		path := filepath.Join(w.dir, segmentName(id))
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0, fmt.Errorf("wal: stat segment %d: %w", id, err)
+		}
+		total += info.Size()
 	}
-
-	return info.Size(), nil
+	return total, nil
 }
 
-// Truncate removes all records from the WAL file and resets the file to empty.
-// This is called after a successful WAL replay to prevent unbounded growth
-// and avoid replaying already-recovered records on subsequent opens.
+// Truncate removes all WAL segments and creates a fresh empty active segment.
+// This is called after WAL replay to prevent unbounded growth and avoid
+// replaying already-recovered records on subsequent opens.
 func (w *WAL) Truncate() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -220,77 +282,256 @@ func (w *WAL) Truncate() error {
 		return ErrClosed
 	}
 
-	if err := w.file.Truncate(0); err != nil {
-		return fmt.Errorf("wal: truncate: %w", err)
+	// Close the active file.
+	if err := w.active.Close(); err != nil {
+		return fmt.Errorf("wal: close active: %w", err)
 	}
 
-	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("wal: seek after truncate: %w", err)
+	// Remove all segment files.
+	for _, id := range w.segments {
+		path := filepath.Join(w.dir, segmentName(id))
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("wal: remove segment %d: %w", id, err)
+		}
 	}
 
-	if err := durableSync(w.file); err != nil {
-		return fmt.Errorf("wal: sync after truncate: %w", err)
+	// Create a fresh segment.
+	f, err := createSegment(w.dir, 1)
+	if err != nil {
+		return err
 	}
 
+	w.active = f
+	w.activeID = 1
+	w.segments = []uint64{1}
 	w.nextLSN = 1
 
 	return nil
 }
 
-// scanAndRepair reads the WAL to find the highest valid LSN and truncates
-// any corrupt tail. Caller must hold w.mu (or be in Open before publishing).
-func (w *WAL) scanAndRepair() error {
-	info, err := w.file.Stat()
+// Rotate closes the current active segment and opens a new one.
+//
+// This is called at checkpoint boundaries so that the pre-checkpoint
+// segments can be removed separately via [WAL.RemoveOlderSegments].
+func (w *WAL) Rotate() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return ErrClosed
+	}
+
+	// Sync and close the current active segment.
+	if err := durableSync(w.active); err != nil {
+		return fmt.Errorf("wal: rotate sync: %w", err)
+	}
+	if err := w.active.Close(); err != nil {
+		return fmt.Errorf("wal: rotate close: %w", err)
+	}
+
+	// Open a new segment with the next ID.
+	newID := w.activeID + 1
+	f, err := createSegment(w.dir, newID)
 	if err != nil {
-		return fmt.Errorf("wal: stat: %w", err)
+		return err
+	}
+
+	w.active = f
+	w.activeID = newID
+	w.segments = append(w.segments, newID)
+
+	return nil
+}
+
+// RemoveOlderSegments deletes all WAL segments except the active one.
+//
+// This is called after a checkpoint's meta swap to reclaim disk space
+// from segments whose records are now durably on the data file.
+func (w *WAL) RemoveOlderSegments() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return ErrClosed
+	}
+
+	var kept []uint64
+	for _, id := range w.segments {
+		if id == w.activeID {
+			kept = append(kept, id)
+			continue
+		}
+		path := filepath.Join(w.dir, segmentName(id))
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("wal: remove segment %d: %w", id, err)
+		}
+	}
+	w.segments = kept
+
+	return nil
+}
+
+// SegmentCount returns the number of WAL segment files.
+func (w *WAL) SegmentCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.segments)
+}
+
+// scanAllSegments reads all segments to find the highest LSN, and repairs
+// the active segment's corrupt tail if needed. Called during Open.
+func (w *WAL) scanAllSegments() error {
+	// Scan older (non-active) segments for their highest LSN.
+	for _, id := range w.segments {
+		if id == w.activeID {
+			continue
+		}
+		path := filepath.Join(w.dir, segmentName(id))
+		f, err := os.Open(path) //nolint:gosec // G304: path from dir.
+		if err != nil {
+			return fmt.Errorf("wal: open segment %d for scan: %w", id, err)
+		}
+		highLSN := w.scanFileForLSN(f)
+		_ = f.Close()
+		if highLSN >= w.nextLSN {
+			w.nextLSN = highLSN + 1
+		}
+	}
+
+	// Scan and repair the active segment.
+	return w.scanAndRepairActive()
+}
+
+// scanFileForLSN reads a file and returns the highest LSN found.
+func (w *WAL) scanFileForLSN(f *os.File) uint64 {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0
+	}
+	var highest uint64
+	for {
+		rec, _, err := readOneRecord(f)
+		if err != nil {
+			break
+		}
+		if rec.LSN > highest {
+			highest = rec.LSN
+		}
+	}
+	return highest
+}
+
+// scanAndRepairActive reads the active segment to find the highest valid LSN
+// and truncates any corrupt tail. Caller must hold w.mu.
+func (w *WAL) scanAndRepairActive() error {
+	info, err := w.active.Stat()
+	if err != nil {
+		return fmt.Errorf("wal: stat active: %w", err)
 	}
 
 	if info.Size() == 0 {
-		return nil // empty WAL
+		return nil
 	}
 
-	// Seek to beginning.
-	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("wal: seek: %w", err)
+	if _, err := w.active.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("wal: seek active: %w", err)
 	}
 
 	var lastValidOffset int64
-	var highestLSN uint64
-
 	offset := int64(0)
+
 	for {
-		rec, n, err := readOneRecord(w.file)
+		rec, n, err := readOneRecord(w.active)
 		if err != nil {
-			// Corrupt tail or EOF — truncate here.
 			break
 		}
-		if rec.LSN > highestLSN {
-			highestLSN = rec.LSN
+		if rec.LSN >= w.nextLSN {
+			w.nextLSN = rec.LSN + 1
 		}
 		offset += int64(n)
 		lastValidOffset = offset
 	}
 
-	if highestLSN > 0 {
-		w.nextLSN = highestLSN + 1
-	}
-
-	// Truncate any corrupt tail.
+	// Truncate any corrupt tail in the active segment.
 	if lastValidOffset < info.Size() {
-		if err := w.file.Truncate(lastValidOffset); err != nil {
+		if err := w.active.Truncate(lastValidOffset); err != nil {
 			return fmt.Errorf("wal: truncate corrupt tail: %w", err)
 		}
-		if err := durableSync(w.file); err != nil {
+		if err := durableSync(w.active); err != nil {
 			return fmt.Errorf("wal: sync after truncate: %w", err)
 		}
 	}
 
 	// Seek to end for future appends.
-	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+	if _, err := w.active.Seek(0, io.SeekEnd); err != nil {
 		return fmt.Errorf("wal: seek to end: %w", err)
 	}
 
 	return nil
+}
+
+// replaySegment replays records from a single segment file.
+func (w *WAL) replaySegment(id uint64, fn func(Record) error) error {
+	if id == w.activeID {
+		return replayFile(w.active, fn)
+	}
+	path := filepath.Join(w.dir, segmentName(id))
+	f, err := os.Open(path) //nolint:gosec // G304: path from dir.
+	if err != nil {
+		return fmt.Errorf("wal: open segment %d for replay: %w", id, err)
+	}
+	defer func() { _ = f.Close() }()
+	return replayFile(f, fn)
+}
+
+// migrateLegacy renames a legacy wal.log to wal-00000001.log if present.
+func migrateLegacy(dir string) error {
+	legacy := filepath.Join(dir, legacyWALFileName)
+	if _, err := os.Stat(legacy); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	newPath := filepath.Join(dir, segmentName(1))
+	return os.Rename(legacy, newPath)
+}
+
+// discoverSegments finds all wal-XXXXXXXX.log files in dir and returns
+// their IDs sorted ascending.
+func discoverSegments(dir string) ([]uint64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("wal: read dir: %w", err)
+	}
+
+	var ids []uint64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		var id uint64
+		if _, err := fmt.Sscanf(e.Name(), "wal-%08d.log", &id); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
+// createSegment creates a new empty segment file and returns it open for R/W.
+func createSegment(dir string, id uint64) (*os.File, error) {
+	path := filepath.Join(dir, segmentName(id))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_EXCL, filePerms) //nolint:gosec // G304: path constructed from dir+segmentName.
+	if err != nil {
+		return nil, fmt.Errorf("wal: create segment %d: %w", id, err)
+	}
+	return f, nil
+}
+
+// ActiveSegmentPath returns the path to the active segment file.
+// Exported for test access only.
+func (w *WAL) ActiveSegmentPath() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return filepath.Join(w.dir, segmentName(w.activeID))
 }
 
 // replayFile reads all valid records from the file (from position 0) and

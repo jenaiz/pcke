@@ -865,3 +865,109 @@ func TestKeyTooLarge(t *testing.T) {
 		t.Errorf("Put(bigKey) = %v, want ErrKeyTooLarge", err)
 	}
 }
+
+// TestMergeDeleteInsert10K verifies that 10K random delete+insert operations
+// maintain B+tree balance and sorted order (F1.T11 acceptance criterion).
+func TestMergeDeleteInsert10K(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 10K ops in short mode")
+	}
+
+	tree, _, _ := testEnv(t, 5000) // plenty of free pages
+
+	rng := rand.New(rand.NewPCG(42, 99)) //nolint:gosec // G404: deterministic seed for reproducibility.
+
+	// Insert 500 initial keys.
+	keys := make(map[string]string)
+	for i := range 500 {
+		k := fmt.Sprintf("key-%06d", i)
+		v := fmt.Sprintf("val-%06d", i)
+		if err := tree.Put([]byte(k), []byte(v)); err != nil {
+			t.Fatalf("initial Put(%s): %v", k, err)
+		}
+		keys[k] = v
+	}
+
+	// 10K random operations: ~50% insert, ~50% delete.
+	for i := range 10_000 {
+		if rng.IntN(2) == 0 && len(keys) > 10 {
+			deleteRandomKey(t, tree, keys, rng, i)
+		} else {
+			k := fmt.Sprintf("key-%06d", 500+i)
+			v := fmt.Sprintf("val-%06d", 500+i)
+			if err := tree.Put([]byte(k), []byte(v)); err != nil {
+				t.Fatalf("iter %d Put(%s): %v", i, k, err)
+			}
+			keys[k] = v
+		}
+	}
+
+	verifyTreeContents(t, tree, keys)
+	t.Logf("10K ops done: %d keys remaining, depth=%d", len(keys), tree.Depth())
+}
+
+// deleteRandomKey picks a random key from the map and deletes it from the tree.
+func deleteRandomKey(t *testing.T, tree *btree.Tree, keys map[string]string, rng *rand.Rand, iter int) {
+	t.Helper()
+	idx := rng.IntN(len(keys))
+	j := 0
+	for k := range keys {
+		if j == idx {
+			if err := tree.Delete([]byte(k)); err != nil {
+				t.Fatalf("iter %d Delete(%s): %v", iter, k, err)
+			}
+			delete(keys, k)
+			return
+		}
+		j++
+	}
+}
+
+// verifyTreeContents checks that all keys in the map are in the tree and that
+// cursor iteration yields sorted order.
+func verifyTreeContents(t *testing.T, tree *btree.Tree, keys map[string]string) {
+	t.Helper()
+
+	var expected []string
+	for k := range keys {
+		expected = append(expected, k)
+	}
+	sort.Strings(expected)
+
+	for _, k := range expected {
+		v, err := tree.Get([]byte(k))
+		if err != nil {
+			t.Errorf("Get(%s): %v", k, err)
+			continue
+		}
+		if string(v) != keys[k] {
+			t.Errorf("Get(%s) = %q, want %q", k, v, keys[k])
+		}
+	}
+
+	c := tree.Cursor()
+	if !c.First() {
+		if len(expected) > 0 {
+			t.Fatal("Cursor.First() = false but tree has keys")
+		}
+		return
+	}
+
+	var cursorKeys []string
+	for c.Valid() {
+		cursorKeys = append(cursorKeys, string(c.Key()))
+		c.Next()
+	}
+
+	if len(cursorKeys) != len(expected) {
+		t.Errorf("cursor returned %d keys, want %d", len(cursorKeys), len(expected))
+	}
+
+	for i := 1; i < len(cursorKeys); i++ {
+		if cursorKeys[i] <= cursorKeys[i-1] {
+			t.Errorf("cursor not sorted at index %d: %q <= %q",
+				i, cursorKeys[i], cursorKeys[i-1])
+			break
+		}
+	}
+}

@@ -36,9 +36,12 @@ type Stats struct {
 	ActiveLSN     uint64 `json:"active_lsn"`
 
 	// Buffer pool
-	BufferPoolSize int `json:"buffer_pool_size"`
-	DirtyPages     int `json:"dirty_pages"`
-	PinnedPages    int `json:"pinned_pages"`
+	BufferPoolSize int     `json:"buffer_pool_size"`
+	DirtyPages     int     `json:"dirty_pages"`
+	PinnedPages    int     `json:"pinned_pages"`
+	BufferPoolHits uint64  `json:"buffer_pool_hits"`
+	BufferPoolMiss uint64  `json:"buffer_pool_misses"`
+	BufferHitRate  float64 `json:"buffer_hit_rate"`
 
 	// Meta
 	Generation     uint64 `json:"generation"`
@@ -74,6 +77,9 @@ func (s Stats) Human() string {
 	fmt.Fprintf(&b, "  Pool size:       %d pages\n", s.BufferPoolSize)
 	fmt.Fprintf(&b, "  Dirty pages:     %d\n", s.DirtyPages)
 	fmt.Fprintf(&b, "  Pinned pages:    %d\n", s.PinnedPages)
+	fmt.Fprintf(&b, "  Cache hits:      %d\n", s.BufferPoolHits)
+	fmt.Fprintf(&b, "  Cache misses:    %d\n", s.BufferPoolMiss)
+	fmt.Fprintf(&b, "  Hit rate:        %.1f%%\n", s.BufferHitRate*100)
 
 	fmt.Fprintf(&b, "\nMeta\n")
 	fmt.Fprintf(&b, "  Generation:      %d\n", s.Generation)

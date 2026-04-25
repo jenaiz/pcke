@@ -2,9 +2,11 @@ package wal_test
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jenaiz/pcke/internal/kdb/wal"
@@ -277,7 +279,7 @@ func TestCorruptTailTruncated(t *testing.T) {
 	}
 
 	// Append garbage to simulate incomplete write.
-	walPath := filepath.Join(dir, "wal.log")
+	walPath := filepath.Join(dir, "wal-00000001.log")
 	f, err := os.OpenFile(walPath, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: test path.
 	if err != nil {
 		t.Fatalf("open for corruption: %v", err)
@@ -325,7 +327,8 @@ func TestCorruptTailPartialHeader(t *testing.T) {
 	}
 
 	// Append a partial header (fewer than 13 bytes).
-	walPath := filepath.Join(dir, "wal.log")
+	walPath := w1.ActiveSegmentPath()
+	_ = w1.Close()
 	f, err := os.OpenFile(walPath, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: test path.
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -369,7 +372,8 @@ func TestCorruptCRC(t *testing.T) {
 	}
 
 	// Corrupt the CRC of the second record.
-	walPath := filepath.Join(dir, "wal.log")
+	walPath := w1.ActiveSegmentPath()
+	_ = w1.Close()
 	data, err := os.ReadFile(walPath) //nolint:gosec // G304: test path.
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -531,6 +535,233 @@ func TestStressAppendReplay(t *testing.T) {
 	}
 }
 
+// ── Segment rotation (F1.T3) ──
+
+func TestRotateCreatesNewSegment(t *testing.T) {
+	w, dir := newTestWAL(t)
+
+	// Write to first segment.
+	if _, err := w.Append(wal.TypeInsert, []byte("seg1")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	if w.SegmentCount() != 1 {
+		t.Fatalf("SegmentCount before rotate = %d, want 1", w.SegmentCount())
+	}
+
+	// Rotate.
+	if err := w.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+
+	if w.SegmentCount() != 2 {
+		t.Fatalf("SegmentCount after rotate = %d, want 2", w.SegmentCount())
+	}
+
+	// Write to second segment.
+	if _, err := w.Append(wal.TypeInsert, []byte("seg2")); err != nil {
+		t.Fatalf("Append after rotate: %v", err)
+	}
+
+	// Verify both segment files exist.
+	assertSegmentFileExists(t, dir, 1)
+	assertSegmentFileExists(t, dir, 2)
+
+	// Replay should see both records in order.
+	var records []wal.Record
+	if err := w.Replay(func(r wal.Record) error {
+		records = append(records, r)
+		return nil
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+
+	if len(records) != 2 {
+		t.Fatalf("replayed %d records, want 2", len(records))
+	}
+	if string(records[0].Payload) != "seg1" || string(records[1].Payload) != "seg2" {
+		t.Errorf("payloads = %q, %q; want seg1, seg2",
+			records[0].Payload, records[1].Payload)
+	}
+}
+
+func TestRemoveOlderSegments(t *testing.T) {
+	w, dir := newTestWAL(t)
+
+	// Write and rotate 3 times.
+	for i := range 3 {
+		if _, err := w.Append(wal.TypeInsert, []byte{byte(i)}); err != nil { //nolint:gosec
+			t.Fatalf("Append[%d]: %v", i, err)
+		}
+		if err := w.Rotate(); err != nil {
+			t.Fatalf("Rotate[%d]: %v", i, err)
+		}
+	}
+
+	if w.SegmentCount() != 4 {
+		t.Fatalf("SegmentCount = %d, want 4", w.SegmentCount())
+	}
+
+	// Remove older segments.
+	if err := w.RemoveOlderSegments(); err != nil {
+		t.Fatalf("RemoveOlderSegments: %v", err)
+	}
+
+	if w.SegmentCount() != 1 {
+		t.Fatalf("SegmentCount after remove = %d, want 1", w.SegmentCount())
+	}
+
+	// Only the active segment should remain.
+	files := segmentFiles(t, dir)
+	if len(files) != 1 {
+		t.Fatalf("found %d segment files, want 1: %v", len(files), files)
+	}
+}
+
+func TestRotateReplayAcrossSegments(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Write records across 3 segments.
+	for i := range 9 {
+		if _, err := w.Append(wal.TypeInsert, []byte{byte(i)}); err != nil { //nolint:gosec
+			t.Fatalf("Append[%d]: %v", i, err)
+		}
+		if (i+1)%3 == 0 && i < 8 {
+			if err := w.Rotate(); err != nil {
+				t.Fatalf("Rotate: %v", err)
+			}
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen and replay — all records should be in order.
+	w2, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("Open[2]: %v", err)
+	}
+	defer func() { _ = w2.Close() }()
+
+	var lsns []uint64
+	if err := w2.Replay(func(r wal.Record) error {
+		lsns = append(lsns, r.LSN)
+		return nil
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+
+	if len(lsns) != 9 {
+		t.Fatalf("replayed %d, want 9", len(lsns))
+	}
+	for i := 1; i < len(lsns); i++ {
+		if lsns[i] <= lsns[i-1] {
+			t.Errorf("LSNs not monotonic at %d: %d <= %d", i, lsns[i], lsns[i-1])
+		}
+	}
+}
+
+func TestCheckpointRotatesAndCleansWAL(t *testing.T) {
+	w, dir := newTestWAL(t)
+
+	// Write some records, rotate, write more.
+	for i := range 5 {
+		if _, err := w.Append(wal.TypeInsert, []byte{byte(i)}); err != nil { //nolint:gosec
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if err := w.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	for i := range 5 {
+		if _, err := w.Append(wal.TypeInsert, []byte{byte(i + 10)}); err != nil { //nolint:gosec
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	// Simulate checkpoint: write checkpoint record, rotate, remove old.
+	if _, err := w.Append(wal.TypeCheckpoint, nil); err != nil {
+		t.Fatalf("Append checkpoint: %v", err)
+	}
+	if err := w.Rotate(); err != nil {
+		t.Fatalf("Rotate for checkpoint: %v", err)
+	}
+	if err := w.RemoveOlderSegments(); err != nil {
+		t.Fatalf("RemoveOlderSegments: %v", err)
+	}
+
+	// Only the new empty segment should remain.
+	files := segmentFiles(t, dir)
+	if len(files) != 1 {
+		t.Errorf("expected 1 segment after checkpoint, got %d: %v", len(files), files)
+	}
+
+	// WAL size should be 0 (empty active segment).
+	size, err := w.FileSize()
+	if err != nil {
+		t.Fatalf("FileSize: %v", err)
+	}
+	if size != 0 {
+		t.Errorf("FileSize = %d, want 0 after checkpoint", size)
+	}
+}
+
+func TestLegacyWALMigration(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a legacy wal.log file with a valid record.
+	legacyPath := filepath.Join(dir, "wal.log")
+	err := os.WriteFile(legacyPath, nil, 0o600)
+	if err != nil {
+		t.Fatalf("create legacy WAL: %v", err)
+	}
+
+	// Open should migrate it to wal-00000001.log.
+	w, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = w.Close() }()
+
+	// Legacy file should be gone.
+	if _, err := os.Stat(legacyPath); err == nil {
+		t.Error("legacy wal.log should have been renamed")
+	}
+
+	// Segment file should exist.
+	assertSegmentFileExists(t, dir, 1)
+}
+
+// ── Helpers ──
+
+func assertSegmentFileExists(t *testing.T, dir string, id int) {
+	t.Helper()
+	name := filepath.Join(dir, fmt.Sprintf("wal-%08d.log", id))
+	if _, err := os.Stat(name); err != nil {
+		t.Errorf("segment %d file missing: %v", id, err)
+	}
+}
+
+func segmentFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var segs []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "wal-") && strings.HasSuffix(e.Name(), ".log") {
+			segs = append(segs, e.Name())
+		}
+	}
+	return segs
+}
+
 // ── Fuzz test: random garbage appended to WAL ──
 
 func FuzzWALCorruptTail(f *testing.F) {
@@ -558,7 +789,7 @@ func FuzzWALCorruptTail(f *testing.F) {
 		}
 
 		// Append fuzz garbage.
-		walPath := filepath.Join(dir, "wal.log")
+		walPath := filepath.Join(dir, "wal-00000001.log")
 		appendF, err := os.OpenFile(walPath, os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: fuzz test.
 		if err != nil {
 			t.Fatalf("open for append: %v", err)

@@ -104,8 +104,8 @@ verify: tools-check lint test build ## DoD for Phase −1: lint + test + build
 # the target announces it explicitly and exits non-zero so CI cannot pass it.
 # ---------------------------------------------------------------------------
 .PHONY: verify-phase-0
-verify-phase-0: ## Run Phase 0 DoD (not implemented yet)
-	@echo "verify-phase-0: not implemented yet — Phase 0 not started." && exit 1
+verify-phase-0: tools-check lint test test-race test-debug build ## Phase 0 DoD: lint + test + race + debug hooks + build
+	@echo "✓ verify-phase-0: all gates passed."
 
 .PHONY: verify-phase-1
 verify-phase-1: ## Run Phase 1 DoD (not implemented yet)

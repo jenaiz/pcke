@@ -557,3 +557,155 @@ func TestPersistAcrossReopen(t *testing.T) {
 		t.Fatalf("View: %v", err)
 	}
 }
+
+func TestCheckpointReducesWAL(t *testing.T) {
+	dir := testDir(t)
+	ctx := context.Background()
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Grow the file to have enough free pages for many inserts.
+	for range 4 {
+		if err := db.Grow(); err != nil {
+			t.Fatalf("Grow: %v", err)
+		}
+	}
+
+	// Insert some data to generate WAL records.
+	for i := range 20 {
+		if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+			key := fmt.Sprintf("key-%04d", i)
+			val := fmt.Sprintf("value-%04d", i)
+			return wtx.Put([]byte(key), []byte(val))
+		}); err != nil {
+			t.Fatalf("Update(%d): %v", i, err)
+		}
+	}
+
+	// WAL should be non-empty now.
+	walSizeBefore := walFileSize(t, dir)
+	if walSizeBefore == 0 {
+		t.Fatal("WAL should be non-empty after 20 inserts")
+	}
+
+	// Checkpoint should flush and truncate WAL.
+	if err := db.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	walSizeAfter := walFileSize(t, dir)
+	if walSizeAfter >= walSizeBefore {
+		t.Errorf("WAL size after checkpoint (%d) should be less than before (%d)",
+			walSizeAfter, walSizeBefore)
+	}
+	if walSizeAfter != 0 {
+		t.Errorf("WAL size after checkpoint = %d, want 0", walSizeAfter)
+	}
+
+	// Data should still be readable after checkpoint.
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
+		val, err := rtx.Get([]byte("key-0010"))
+		if err != nil {
+			return err
+		}
+		if string(val) != "value-0010" {
+			t.Errorf("Get = %q, want %q", val, "value-0010")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View after checkpoint: %v", err)
+	}
+}
+
+func TestCheckpointDataSurvivesReopen(t *testing.T) {
+	dir := testDir(t)
+	ctx := context.Background()
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Insert data.
+	for i := range 50 {
+		if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+			return wtx.Put([]byte(fmt.Sprintf("k%d", i)), []byte(fmt.Sprintf("v%d", i)))
+		}); err != nil {
+			t.Fatalf("Update(%d): %v", i, err)
+		}
+	}
+
+	// Checkpoint.
+	if err := db.Checkpoint(ctx); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	// Close and reopen.
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db2, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	// All data should be accessible.
+	if err := db2.View(ctx, func(rtx *tx.ReadTx) error {
+		for i := range 50 {
+			val, err := rtx.Get([]byte(fmt.Sprintf("k%d", i)))
+			if err != nil {
+				return fmt.Errorf("Get k%d: %w", i, err)
+			}
+			if string(val) != fmt.Sprintf("v%d", i) {
+				t.Errorf("k%d = %q, want %q", i, val, fmt.Sprintf("v%d", i))
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View after reopen: %v", err)
+	}
+}
+
+func TestCheckpointOnClosedDB(t *testing.T) {
+	dir := testDir(t)
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err = db.Checkpoint(context.Background())
+	if !errors.Is(err, kdb.ErrDBClosed) {
+		t.Errorf("Checkpoint on closed DB: got %v, want ErrDBClosed", err)
+	}
+}
+
+// walFileSize returns the total WAL file size in bytes across all segments.
+func walFileSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	walDir := filepath.Join(dir, ".pcke")
+	entries, err := os.ReadDir(walDir)
+	if err != nil {
+		t.Fatalf("read WAL dir: %v", err)
+	}
+	var total int64
+	for _, e := range entries {
+		if len(e.Name()) > 4 && e.Name()[:4] == "wal-" {
+			info, err := e.Info()
+			if err != nil {
+				t.Fatalf("stat WAL segment: %v", err)
+			}
+			total += info.Size()
+		}
+	}
+	return total
+}

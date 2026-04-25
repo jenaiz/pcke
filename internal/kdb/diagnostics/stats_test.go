@@ -20,6 +20,9 @@ func TestStatsJSON(t *testing.T) {
 		BufferPoolSize: 256,
 		DirtyPages:     3,
 		PinnedPages:    1,
+		BufferPoolHits: 900,
+		BufferPoolMiss: 100,
+		BufferHitRate:  0.9,
 		Generation:     5,
 		FreelistRoot:   7,
 		FreelistFormat: 1,
@@ -41,6 +44,7 @@ func TestStatsJSON(t *testing.T) {
 		"tree_depth", "key_count",
 		"wal_total_bytes", "active_lsn",
 		"buffer_pool_size", "dirty_pages", "pinned_pages",
+		"buffer_pool_hits", "buffer_pool_misses", "buffer_hit_rate",
 		"generation", "freelist_root", "freelist_format",
 	}
 	for _, key := range required {
@@ -91,6 +95,9 @@ func TestStatsJSONSchema(t *testing.T) {
 		BufferPoolSize: 1,
 		DirtyPages:     1,
 		PinnedPages:    1,
+		BufferPoolHits: 1,
+		BufferPoolMiss: 1,
+		BufferHitRate:  0.5,
 		Generation:     1,
 		FreelistRoot:   1,
 		FreelistFormat: 1,

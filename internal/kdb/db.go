@@ -534,6 +534,63 @@ func (db *DB) View(_ context.Context, fn func(*tx.ReadTx) error) error {
 	return fn(rtx)
 }
 
+// Checkpoint flushes dirty pages to disk and truncates the WAL.
+//
+// This is the only mechanism that bounds WAL growth — without periodic
+// checkpoints, the WAL grows unbounded until the DB is closed. In Phase 0
+// the WAL was unbounded by design; checkpoint is the Phase 1 fix.
+//
+// Checkpoint is safe to call concurrently with View transactions but
+// serializes against Update. Returns ErrDBClosed if called after Close.
+func (db *DB) Checkpoint(_ context.Context) error {
+	db.rwmu.Lock()
+	defer db.rwmu.Unlock()
+
+	db.mu.Lock()
+	if db.closed {
+		db.mu.Unlock()
+		return ErrDBClosed
+	}
+	pool := db.pool
+	w := db.wal
+	db.mu.Unlock()
+
+	checkCrashHook("db-checkpoint-pre-flush")
+
+	// 1. Flush all dirty pages to the data file.
+	if err := pool.FlushDirty(); err != nil {
+		return fmt.Errorf("kdb: checkpoint flush: %w", err)
+	}
+
+	checkCrashHook("db-checkpoint-post-flush")
+
+	// 2. Write a checkpoint record to WAL (marks the boundary).
+	if _, err := w.Append(wal.TypeCheckpoint, nil); err != nil {
+		return fmt.Errorf("kdb: checkpoint wal record: %w", err)
+	}
+
+	// 3. Swap meta to persist the current state.
+	if err := db.commitMeta(); err != nil {
+		return fmt.Errorf("kdb: checkpoint meta: %w", err)
+	}
+
+	checkCrashHook("db-checkpoint-post-meta")
+
+	// 4. Rotate WAL — start a new segment for future writes.
+	if err := w.Rotate(); err != nil {
+		return fmt.Errorf("kdb: checkpoint rotate wal: %w", err)
+	}
+
+	// 5. Remove old segments — all committed changes are on the data file.
+	if err := w.RemoveOlderSegments(); err != nil {
+		return fmt.Errorf("kdb: checkpoint remove old wal segments: %w", err)
+	}
+
+	checkCrashHook("db-checkpoint-post-truncate")
+
+	return nil
+}
+
 // Update executes fn within a read-write transaction. Only one Update can
 // run at a time (exclusive write lock). If fn returns nil, the transaction
 // is committed (WAL commit + flush dirty pages + meta swap). If fn returns
@@ -690,6 +747,9 @@ func (db *DB) Stats() (diagnostics.Stats, error) {
 	s.BufferPoolSize = poolStats.MaxPages
 	s.DirtyPages = poolStats.DirtyPages
 	s.PinnedPages = poolStats.PinnedPages
+	s.BufferPoolHits = poolStats.Hits
+	s.BufferPoolMiss = poolStats.Misses
+	s.BufferHitRate = poolStats.HitRate
 
 	// Meta.
 	s.Generation = m.Generation
