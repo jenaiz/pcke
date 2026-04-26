@@ -45,6 +45,9 @@ func newRootCmd() *cobra.Command {
 		newConfigCmd(),
 		newRecallCmd(),
 		newCompactCmd(),
+		newQueryCmd(),
+		newExplainCmd(),
+		newExportCmd(),
 	)
 
 	return root

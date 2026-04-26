@@ -24,6 +24,7 @@ handle is **jenaiz**.
 - Build tags: `kdbdebug` for assertions/crash hooks (never in releases).
 
 ## Git credentials
-- use always the user jenaiz for git operations, never use jesusnavarrete or glb-jesus
-- use the email jesus.navarrete@gmail.com por git operations, never use other email in this repository
-- all commits must be signed with the a associated email address, never use other email address for signing commits in this repository
+- The **only** permitted git user is `jenaiz` with email `jesus.navarrete@gmail.com`.
+- Never use `jesusnavarrete`, `glb-jesus`, or any other username/email for commits.
+- Every `git commit` must include `-c user.name="jenaiz" -c user.email="jesus.navarrete@gmail.com"`.
+- Commit signing is not required.

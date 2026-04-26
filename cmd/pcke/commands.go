@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -12,9 +13,10 @@ import (
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/index/fts"
-	"github.com/jenaiz/pcke/internal/kdb/query"
+	kdbquery "github.com/jenaiz/pcke/internal/kdb/query"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/output"
+	"github.com/jenaiz/pcke/internal/query"
 )
 
 func newInitCmd() *cobra.Command {
@@ -273,7 +275,7 @@ Results are ranked using BM25 relevance scoring.`,
 			}
 			idx.Commit()
 
-			planner := query.NewPlanner(idx)
+			planner := kdbquery.NewPlanner(idx)
 			results := planner.Search(queryStr, limit)
 
 			if len(results) == 0 {
@@ -323,4 +325,173 @@ file, reclaiming free pages and pruning soft-deleted data.`,
 			return nil
 		},
 	}
+}
+
+func newQueryCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "query [dsl]",
+		Short: "Query the knowledge base using the pcke DSL",
+		Long: `Execute a structured query against the knowledge base.
+
+Examples:
+  pcke query "nodes where type = 'module' and stability > 0.7"
+  pcke query "evolution where author = 'jesus' order by timestamp desc limit 10"
+  pcke query "notes where tags contains 'decision'"`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runQuery(args[0], "text")
+		},
+	}
+}
+
+func newExplainCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "explain [dsl]",
+		Short: "Show the execution plan for a query",
+		Long: `Parse and plan a query, then print the chosen execution strategy
+without actually running the query.
+
+Example:
+  pcke explain "nodes where module = 'api' order by updated_at desc"`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			q, err := query.Parse(args[0])
+			if err != nil {
+				return fmt.Errorf("explain: %w", err)
+			}
+			if err := query.TypeCheck(q); err != nil {
+				return fmt.Errorf("explain: %w", err)
+			}
+			plan := query.BuildPlan(q)
+			fmt.Print(query.Explain(plan))
+			return nil
+		},
+	}
+}
+
+func newExportCmd() *cobra.Command {
+	var format string
+
+	cmd := &cobra.Command{
+		Use:   "export [dsl]",
+		Short: "Export query results as JSON or YAML",
+		Long: `Execute a query and export the results in the specified format.
+
+Examples:
+  pcke export --format=json "constraints where scope = 'global'"
+  pcke export --format=yaml "nodes where type = 'module'"`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runQuery(args[0], format)
+		},
+	}
+
+	cmd.Flags().StringVar(&format, "format", "json", "Output format: json or yaml")
+
+	return cmd
+}
+
+// runQuery parses, validates, plans, and executes a DSL query, then prints
+// results in the specified format (text, json, yaml).
+func runQuery(dsl, format string) error {
+	q, err := query.Parse(dsl)
+	if err != nil {
+		return fmt.Errorf("query: %w", err)
+	}
+	if err := query.TypeCheck(q); err != nil {
+		return fmt.Errorf("query: %w", err)
+	}
+
+	plan := query.BuildPlan(q)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("query: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("query: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	warnBranchMismatch(db, cwd)
+
+	rs, err := query.Execute(context.Background(), db, plan)
+	if err != nil {
+		return fmt.Errorf("query: %w", err)
+	}
+
+	switch format {
+	case "json":
+		return printJSON(rs)
+	case "yaml":
+		return printYAML(rs)
+	default:
+		return printText(rs)
+	}
+}
+
+func printJSON(rs *query.ResultSet) error {
+	data, err := json.MarshalIndent(rs.Rows, "", "  ")
+	if err != nil {
+		return fmt.Errorf("query: marshal JSON: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func printYAML(rs *query.ResultSet) error {
+	for i, row := range rs.Rows {
+		if i > 0 {
+			fmt.Println("---")
+		}
+		for k, v := range row {
+			fmt.Printf("%s: %v\n", k, yamlValue(v))
+		}
+	}
+	return nil
+}
+
+// yamlValue formats a value for simple YAML output.
+func yamlValue(v any) string {
+	switch val := v.(type) {
+	case string:
+		return fmt.Sprintf("%q", val)
+	case float64:
+		if val == float64(int64(val)) {
+			return fmt.Sprintf("%d", int64(val)) //nolint:gosec // G115: value range is safe.
+		}
+		return fmt.Sprintf("%g", val)
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	case []any:
+		parts := make([]string, len(val))
+		for i, elem := range val {
+			parts[i] = fmt.Sprintf("  - %v", elem)
+		}
+		return "\n" + strings.Join(parts, "\n")
+	case nil:
+		return "null"
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+func printText(rs *query.ResultSet) error {
+	if len(rs.Rows) == 0 {
+		fmt.Println("No results found.")
+		return nil
+	}
+
+	for i, row := range rs.Rows {
+		fmt.Printf("--- result %d ---\n", i+1)
+		for k, v := range row {
+			fmt.Printf("  %s: %v\n", k, v)
+		}
+	}
+	fmt.Printf("\n%d result(s)\n", len(rs.Rows))
+	return nil
 }
