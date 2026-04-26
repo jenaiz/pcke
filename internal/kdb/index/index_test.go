@@ -57,6 +57,10 @@ func TestByModuleInsertScan(t *testing.T) {
 
 	idx := index.NewByModule(pool, fl, 0)
 
+	if name := idx.Name(); name != "by_module" {
+		t.Errorf("Name() = %q, want %q", name, "by_module")
+	}
+
 	// Insert 3 nodes in module "core".
 	for i := 0; i < 3; i++ {
 		pk := []byte(fmt.Sprintf("node-%03d", i))

@@ -1,6 +1,7 @@
 package tx_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/jenaiz/pcke/internal/kdb/btree"
@@ -263,4 +264,102 @@ func encodeKVHelper(key, value []byte) []byte {
 	copy(buf[4:], key)
 	copy(buf[4+len(key):], value)
 	return buf
+}
+
+func TestGroupCommitTx_PutCommit(t *testing.T) {
+	tree, w, pool := setupTestEnv(t)
+
+	wtx := tx.NewGroupCommitTx(tree, w, pool)
+	if err := wtx.Put([]byte("gk1"), []byte("gv1")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := wtx.Put([]byte("gk2"), []byte("gv2")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := wtx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	val, err := tree.Get([]byte("gk1"))
+	if err != nil {
+		t.Fatalf("Get gk1: %v", err)
+	}
+	if string(val) != "gv1" {
+		t.Errorf("gk1 = %q, want %q", val, "gv1")
+	}
+}
+
+func TestGroupCommitTx_Delete(t *testing.T) {
+	tree, w, pool := setupTestEnv(t)
+
+	// Insert first.
+	wtx := tx.NewGroupCommitTx(tree, w, pool)
+	if err := wtx.Put([]byte("del-gc"), []byte("val")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := wtx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Delete.
+	wtx2 := tx.NewGroupCommitTx(tree, w, pool)
+	if err := wtx2.Delete([]byte("del-gc")); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if err := wtx2.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	_, err := tree.Get([]byte("del-gc"))
+	if err == nil {
+		t.Fatal("expected ErrKeyNotFound after group-commit delete")
+	}
+}
+
+func TestGroupCommitTx_ClosedOps(t *testing.T) {
+	tree, w, pool := setupTestEnv(t)
+
+	wtx := tx.NewGroupCommitTx(tree, w, pool)
+	if err := wtx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := wtx.Put([]byte("k"), []byte("v")); err != tx.ErrTxClosed {
+		t.Errorf("Put on closed group-commit tx: got %v, want ErrTxClosed", err)
+	}
+	if err := wtx.Delete([]byte("k")); err != tx.ErrTxClosed {
+		t.Errorf("Delete on closed group-commit tx: got %v, want ErrTxClosed", err)
+	}
+}
+
+func TestReadTxCursor(t *testing.T) {
+	tree, w, pool := setupTestEnv(t)
+
+	// Insert a few keys.
+	wtx := tx.NewWriteTx(tree, w, pool)
+	for i := 0; i < 3; i++ {
+		k := fmt.Sprintf("cur-%02d", i)
+		if err := wtx.Put([]byte(k), []byte("v")); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	if err := wtx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	rtx := tx.NewReadTx(tree)
+	defer rtx.Close()
+
+	cur := rtx.Cursor()
+	if cur == nil {
+		t.Fatal("Cursor returned nil")
+	}
+
+	var count int
+	for cur.First(); cur.Valid(); cur.Next() {
+		count++
+	}
+	if count < 3 {
+		t.Errorf("cursor iterated %d keys, want >= 3", count)
+	}
 }

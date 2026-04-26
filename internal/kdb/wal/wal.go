@@ -206,6 +206,57 @@ func (w *WAL) Append(rt RecordType, payload []byte) (uint64, error) {
 	return lsn, nil
 }
 
+// BatchAppend writes multiple records to the active WAL segment with a single
+// fsync at the end. This reduces the number of fsyncs by batching all writes
+// in a transaction before syncing, which is the core of group commit.
+//
+// Returns the LSN of the first record in the batch. All records in the batch
+// are assigned consecutive LSNs.
+func (w *WAL) BatchAppend(records []BatchRecord) (uint64, error) {
+	if len(records) == 0 {
+		return 0, nil
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return 0, ErrClosed
+	}
+
+	firstLSN := w.nextLSN
+
+	checkCrashHook("wal-pre-write")
+
+	// Write all records without syncing between them.
+	for i := range records {
+		lsn := w.nextLSN
+		buf := encodeRecord(lsn, records[i].Type, records[i].Payload)
+
+		if _, err := w.active.Write(buf); err != nil {
+			return 0, fmt.Errorf("wal: batch write record %d: %w", i, err)
+		}
+		w.nextLSN++
+	}
+
+	checkCrashHook("wal-post-write-pre-sync")
+
+	// Single fsync for the entire batch.
+	if err := durableSync(w.active); err != nil {
+		return 0, fmt.Errorf("wal: batch sync: %w", err)
+	}
+
+	checkCrashHook("wal-post-sync")
+
+	return firstLSN, nil
+}
+
+// BatchRecord describes a record to write in a batch.
+type BatchRecord struct {
+	Type    RecordType
+	Payload []byte
+}
+
 // Replay reads all valid records from all WAL segments (oldest to newest)
 // and calls fn for each one in order. Replay is deterministic: given the
 // same WAL segments, it produces the same sequence of records.

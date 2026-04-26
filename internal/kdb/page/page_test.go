@@ -314,3 +314,22 @@ func ExampleInit() {
 	// lsn: 42
 	// verify: <nil>
 }
+
+func TestGetChecksum(t *testing.T) {
+	t.Parallel()
+	buf := make([]byte, page.Size)
+	page.Init(buf, page.TypeLeaf, 0)
+
+	// After Init, checksum is set. GetChecksum should return non-zero.
+	crc := page.GetChecksum(buf)
+	if crc == 0 {
+		t.Error("GetChecksum returned 0 after Init")
+	}
+
+	// Recompute and verify it matches.
+	page.SetChecksum(buf)
+	crc2 := page.GetChecksum(buf)
+	if crc2 != crc {
+		t.Errorf("GetChecksum mismatch: %d vs %d", crc, crc2)
+	}
+}

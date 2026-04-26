@@ -1165,3 +1165,62 @@ func TestDeepTreeInternalMerge(t *testing.T) {
 		t.Errorf("after full delete KeyCount = %d, want 0", got)
 	}
 }
+
+func TestDeepTreeDeleteFromEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping deep tree test in short mode")
+	}
+
+	tree, _, _ := testEnv(t, 100_000)
+
+	const n = 50_000
+	for i := range n {
+		k := fmt.Sprintf("rend-%08d", i)
+		if err := tree.Put([]byte(k), []byte("v")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Delete from the end (highest keys first) — triggers left-sibling rebalance.
+	for i := n - 1; i >= 0; i-- {
+		k := fmt.Sprintf("rend-%08d", i)
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete %d: %v", i, err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("after full reverse delete KeyCount = %d, want 0", got)
+	}
+}
+
+func TestDeepTreeRandomDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping deep tree test in short mode")
+	}
+
+	tree, _, _ := testEnv(t, 100_000)
+
+	const n = 30_000
+	keys := make([]string, n)
+	for i := range n {
+		keys[i] = fmt.Sprintf("rdel-%08d", i)
+		if err := tree.Put([]byte(keys[i]), []byte("v")); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	// Shuffle and delete all in random order — triggers various merge/redistribute paths.
+	rng := rand.New(rand.NewPCG(12345, 67890)) //nolint:gosec // G404: deterministic seed for test reproducibility.
+	rng.Shuffle(n, func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
+
+	for _, k := range keys {
+		if err := tree.Delete([]byte(k)); err != nil {
+			t.Fatalf("Delete %s: %v", k, err)
+		}
+	}
+
+	if got := tree.KeyCount(); got != 0 {
+		t.Errorf("after random delete KeyCount = %d, want 0", got)
+	}
+}

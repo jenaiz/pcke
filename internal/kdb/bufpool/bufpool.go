@@ -242,6 +242,25 @@ type PoolStats struct {
 	HitRate     float64 // hits / (hits + misses); 0 if no accesses
 }
 
+// MaxPages returns the current pool capacity.
+func (p *Pool) MaxPages() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.maxPages
+}
+
+// SetMaxPages updates the pool capacity. If the new capacity is smaller than
+// the current number of cached frames, excess frames will be evicted lazily
+// on subsequent Pin calls. SetMaxPages is safe for concurrent use.
+func (p *Pool) SetMaxPages(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n < 1 {
+		n = 1
+	}
+	p.maxPages = n
+}
+
 // IsDirty reports whether the page is marked dirty in the pool.
 // Returns false if the page is not cached.
 func (p *Pool) IsDirty(pageID uint64) bool {

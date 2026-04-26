@@ -318,3 +318,53 @@ func assertNormsEqual(t *testing.T, a, b map[uint64]uint32) {
 		}
 	}
 }
+
+func TestDecodeSegmentTruncated(t *testing.T) {
+	// Create a valid encoded segment, then truncate at every byte to cover
+	// all decoder error branches.
+	mem := NewMemSegment(100)
+	mem.AddDocument(1, "hello world")
+	data := mem.Freeze().Encode()
+
+	for size := range len(data) {
+		_, err := DecodeSegment(data[:size])
+		if err == nil {
+			t.Errorf("DecodeSegment with %d/%d bytes: expected error", size, len(data))
+		}
+	}
+}
+
+func TestDecodeSegmentEmpty(t *testing.T) {
+	_, err := DecodeSegment(nil)
+	if err == nil {
+		t.Error("DecodeSegment(nil): expected error")
+	}
+	_, err = DecodeSegment([]byte{})
+	if err == nil {
+		t.Error("DecodeSegment([]byte{}): expected error")
+	}
+}
+
+func TestDecodeSegmentTruncatedMultiDoc(t *testing.T) {
+	// Multiple docs exercise the norms loop truncation path.
+	mem := NewMemSegment(200)
+	mem.AddDocument(1, "hello world")
+	mem.AddDocument(2, "foo bar baz")
+	mem.AddDocument(3, "quick brown fox")
+	data := mem.Freeze().Encode()
+
+	for size := range len(data) {
+		_, err := DecodeSegment(data[:size])
+		if err == nil {
+			t.Errorf("DecodeSegment with %d/%d bytes: expected error", size, len(data))
+		}
+	}
+}
+
+func TestAvgDocLenEmpty(t *testing.T) {
+	mem := NewMemSegment(101)
+	seg := mem.Freeze()
+	if avg := seg.AvgDocLen(); avg != 0 {
+		t.Errorf("AvgDocLen on empty segment = %f, want 0", avg)
+	}
+}

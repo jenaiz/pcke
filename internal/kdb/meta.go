@@ -55,8 +55,9 @@ const (
 	metaOffPageCount       = metaOffGeneration + 8
 	metaOffFreelistRoot    = metaOffPageCount + 8
 	metaOffFreelistFormat  = metaOffFreelistRoot + 8
-	metaOffReserved        = metaOffFreelistFormat + 1
-	metaOffTreeRoot        = metaOffReserved + 3
+	metaOffSchemaVersion   = metaOffFreelistFormat + 1
+	metaOffReserved        = metaOffSchemaVersion + 2
+	metaOffTreeRoot        = metaOffReserved + 1
 	metaOffModuleIndexRoot = metaOffTreeRoot + 8
 	metaOffTagIndexRoot    = metaOffModuleIndexRoot + 8
 	metaOffFileIndexRoot   = metaOffTagIndexRoot + 8
@@ -80,6 +81,7 @@ type Meta struct {
 	PageCount       uint64
 	FreelistRoot    uint64
 	FreelistFormat  FreelistFormat
+	SchemaVersion   uint16
 	TreeRoot        uint64
 	ModuleIndexRoot uint64
 	TagIndexRoot    uint64
@@ -97,6 +99,8 @@ func encodeMeta(buf []byte, m *Meta) {
 	encoding.PutUint64(buf[metaOffPageCount:], m.PageCount)
 	encoding.PutUint64(buf[metaOffFreelistRoot:], m.FreelistRoot)
 	buf[metaOffFreelistFormat] = byte(m.FreelistFormat)
+	buf[metaOffSchemaVersion] = byte(m.SchemaVersion)        //nolint:gosec // G115: SchemaVersion fits in uint16.
+	buf[metaOffSchemaVersion+1] = byte(m.SchemaVersion >> 8) //nolint:gosec // G115: high byte of uint16.
 	encoding.PutUint64(buf[metaOffTreeRoot:], m.TreeRoot)
 	encoding.PutUint64(buf[metaOffModuleIndexRoot:], m.ModuleIndexRoot)
 	encoding.PutUint64(buf[metaOffTagIndexRoot:], m.TagIndexRoot)
@@ -124,6 +128,7 @@ func decodeMeta(buf []byte) (*Meta, error) {
 		PageCount:       encoding.Uint64(buf[metaOffPageCount:]),
 		FreelistRoot:    encoding.Uint64(buf[metaOffFreelistRoot:]),
 		FreelistFormat:  FreelistFormat(buf[metaOffFreelistFormat]),
+		SchemaVersion:   uint16(buf[metaOffSchemaVersion]) | uint16(buf[metaOffSchemaVersion+1])<<8,
 		TreeRoot:        encoding.Uint64(buf[metaOffTreeRoot:]),
 		ModuleIndexRoot: encoding.Uint64(buf[metaOffModuleIndexRoot:]),
 		TagIndexRoot:    encoding.Uint64(buf[metaOffTagIndexRoot:]),

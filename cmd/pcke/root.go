@@ -48,6 +48,7 @@ func newRootCmd() *cobra.Command {
 		newQueryCmd(),
 		newExplainCmd(),
 		newExportCmd(),
+		newMigrateCmd(),
 	)
 
 	return root

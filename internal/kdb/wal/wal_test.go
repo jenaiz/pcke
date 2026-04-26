@@ -982,3 +982,145 @@ func TestNextLSNAfterReopen(t *testing.T) {
 		t.Errorf("new LSN %d <= last LSN %d", newLSN, lastLSN)
 	}
 }
+
+func TestRotateOnClosedWAL(t *testing.T) {
+	w, _ := newTestWAL(t)
+	_ = w.Close()
+
+	err := w.Rotate()
+	if err == nil {
+		t.Fatal("expected error on closed WAL Rotate")
+	}
+}
+
+func TestRemoveOlderSegmentsOnClosedWAL(t *testing.T) {
+	w, _ := newTestWAL(t)
+	_ = w.Close()
+
+	err := w.RemoveOlderSegments()
+	if err == nil {
+		t.Fatal("expected error on closed WAL RemoveOlderSegments")
+	}
+}
+
+func TestFileSizeMultipleSegments(t *testing.T) {
+	w, _ := newTestWAL(t)
+
+	for range 5 {
+		if _, err := w.Append(wal.TypeInsert, bytes.Repeat([]byte("y"), 200)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	if err := w.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+
+	for range 5 {
+		if _, err := w.Append(wal.TypeInsert, bytes.Repeat([]byte("z"), 200)); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	sz, err := w.FileSize()
+	if err != nil {
+		t.Fatalf("FileSize: %v", err)
+	}
+	if sz <= 0 {
+		t.Errorf("FileSize = %d, want > 0", sz)
+	}
+}
+
+func TestRotateAndReplay(t *testing.T) {
+	dir := t.TempDir()
+	w, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Write records, rotate, write more, close, reopen, replay all.
+	for i := range 3 {
+		if _, err := w.Append(wal.TypeInsert, []byte(fmt.Sprintf("seg1-%d", i))); err != nil {
+			t.Fatalf("Append seg1: %v", err)
+		}
+	}
+	if err := w.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	for i := range 3 {
+		if _, err := w.Append(wal.TypeInsert, []byte(fmt.Sprintf("seg2-%d", i))); err != nil {
+			t.Fatalf("Append seg2: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen and replay — should get all 6 records.
+	w2, err := wal.Open(dir)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = w2.Close() }()
+
+	var count int
+	if err := w2.Replay(func(_ wal.Record) error {
+		count++
+		return nil
+	}); err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if count != 6 {
+		t.Errorf("Replay count = %d, want 6", count)
+	}
+}
+
+func TestDoubleClose(t *testing.T) {
+	w, _ := newTestWAL(t)
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	// Second close should be a no-op (idempotent).
+	if err := w.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestReplayCallbackError(t *testing.T) {
+	w, _ := newTestWAL(t)
+
+	// Append a record.
+	if _, err := w.Append(wal.TypeInsert, []byte("data")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Replay with a callback that returns an error.
+	errBoom := fmt.Errorf("boom")
+	err := w.Replay(func(_ wal.Record) error {
+		return errBoom
+	})
+	if err == nil {
+		t.Fatal("expected error from Replay callback")
+	}
+}
+
+func TestAppendOnClosedReturnsError(t *testing.T) {
+	w, _ := newTestWAL(t)
+	_ = w.Close()
+
+	_, err := w.Append(wal.TypeInsert, []byte("data"))
+	if err == nil {
+		t.Fatal("expected error on Append after Close")
+	}
+}
+
+func TestBatchAppendOnClosedReturnsError(t *testing.T) {
+	w, _ := newTestWAL(t)
+	_ = w.Close()
+
+	_, err := w.BatchAppend([]wal.BatchRecord{{Type: wal.TypeInsert, Payload: []byte("data")}})
+	if err == nil {
+		t.Fatal("expected error on BatchAppend after Close")
+	}
+}

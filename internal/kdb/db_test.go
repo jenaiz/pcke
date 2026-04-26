@@ -1748,3 +1748,219 @@ func TestMultipleReopenCycles(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 }
+
+// ── Group commit ──
+
+func TestGroupCommit_BasicPutGet(t *testing.T) {
+	dir := testDir(t)
+	ctx := context.Background()
+
+	db, err := kdb.Open(dir, &kdb.Options{GroupCommit: true})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Grow the database so we have enough pages.
+	for range 3 {
+		if err := db.Grow(); err != nil {
+			t.Fatalf("Grow: %v", err)
+		}
+	}
+
+	// Write multiple keys in a single transaction (group commit).
+	err = db.Update(ctx, func(wtx *tx.WriteTx) error {
+		for i := range 20 {
+			key := fmt.Sprintf("gc-key-%03d", i)
+			val := fmt.Sprintf("gc-val-%03d", i)
+			if err := wtx.Put([]byte(key), []byte(val)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Read back all keys.
+	err = db.View(ctx, func(rtx *tx.ReadTx) error {
+		for i := range 20 {
+			key := fmt.Sprintf("gc-key-%03d", i)
+			val, err := rtx.Get([]byte(key))
+			if err != nil {
+				return fmt.Errorf("Get(%s): %w", key, err)
+			}
+			want := fmt.Sprintf("gc-val-%03d", i)
+			if string(val) != want {
+				return fmt.Errorf("Get(%s) = %q, want %q", key, val, want)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+}
+
+func TestGroupCommit_SurvivesReopen(t *testing.T) {
+	dir := testDir(t)
+	ctx := context.Background()
+
+	db, err := kdb.Open(dir, &kdb.Options{GroupCommit: true})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	err = db.Update(ctx, func(wtx *tx.WriteTx) error {
+		for i := range 50 {
+			key := fmt.Sprintf("persist-%03d", i)
+			if err := wtx.Put([]byte(key), []byte("value")); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen and verify data survived.
+	db, err = kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	err = db.View(ctx, func(rtx *tx.ReadTx) error {
+		for i := range 50 {
+			key := fmt.Sprintf("persist-%03d", i)
+			if _, err := rtx.Get([]byte(key)); err != nil {
+				return fmt.Errorf("missing %s: %w", key, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View after reopen: %v", err)
+	}
+}
+
+func TestSchemaVersion(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Default schema version is 0.
+	if v := db.SchemaVersion(); v != 0 {
+		t.Fatalf("SchemaVersion = %d, want 0", v)
+	}
+
+	// Set and read back.
+	db.SetSchemaVersion(42)
+	if v := db.SchemaVersion(); v != 42 {
+		t.Fatalf("SchemaVersion = %d, want 42", v)
+	}
+}
+
+func TestSchemaVersion_SurvivesReopen(t *testing.T) {
+	dir := testDir(t)
+	ctx := context.Background()
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	db.SetSchemaVersion(7)
+
+	// Perform an update so checkpoint persists the meta with SchemaVersion.
+	err = db.Update(ctx, func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("k"), []byte("v"))
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db, err = kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if v := db.SchemaVersion(); v != 7 {
+		t.Fatalf("SchemaVersion after reopen = %d, want 7", v)
+	}
+}
+
+func TestViewCursor(t *testing.T) {
+	dir := testDir(t)
+	ctx := context.Background()
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Insert keys.
+	err = db.Update(ctx, func(wtx *tx.WriteTx) error {
+		for i := range 5 {
+			k := fmt.Sprintf("cur-%03d", i)
+			if err := wtx.Put([]byte(k), []byte("v")); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Iterate with cursor.
+	var keys []string
+	err = db.View(ctx, func(rtx *tx.ReadTx) error {
+		cur := rtx.Cursor()
+		for cur.First(); cur.Valid(); cur.Next() {
+			keys = append(keys, string(cur.Key()))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+
+	if len(keys) < 5 {
+		t.Fatalf("cursor returned %d keys, want >= 5", len(keys))
+	}
+}
+
+func TestStats_SchemaVersion(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	db.SetSchemaVersion(3)
+
+	s, err := db.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if s.SchemaVersion != 3 {
+		t.Fatalf("Stats.SchemaVersion = %d, want 3", s.SchemaVersion)
+	}
+}

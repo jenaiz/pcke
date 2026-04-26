@@ -463,3 +463,351 @@ func requireNoError(t *testing.T, err error) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestDecoderInt64Truncated(t *testing.T) {
+	// 1 field declared, tag = WireFixed64, only 3 data bytes.
+	data := []byte{1, 1, MakeTag(0, WireFixed64), 0x01, 0x02, 0x03}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.Int64()
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderFloat64Truncated(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireFixed64), 0x01, 0x02, 0x03}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.Float64()
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderStringTruncated(t *testing.T) {
+	// Tag says WireBytes, length varint says 10, but not enough data.
+	data := []byte{1, 1, MakeTag(0, WireBytes), 10, 0x01}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.String()
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderStringListTruncated(t *testing.T) {
+	// WireList: count=2, first string length=3 "abc", second string length=5 but only 1 byte.
+	data := []byte{
+		1, 1, MakeTag(0, WireList),
+		2,
+		3, 'a', 'b', 'c',
+		5, 'x',
+	}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.StringList()
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderStringListEmpty(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireList), 0} // count = 0
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	list, err := dec.StringList()
+	requireNoError(t, err)
+	if len(list) != 0 {
+		t.Fatalf("expected empty list, got %d items", len(list))
+	}
+}
+
+func TestDecoderSkipFixed8(t *testing.T) {
+	enc := NewEncoder(1)
+	enc.PutBool(0, true)
+	enc.PutUint64(1, 42)
+	data := enc.Bytes()
+
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); err != nil {
+		t.Fatalf("Skip WireFixed8: %v", err)
+	}
+
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	v, err := dec.Uint64()
+	requireNoError(t, err)
+	if v != 42 {
+		t.Fatalf("after skip, got %d, want 42", v)
+	}
+}
+
+func TestDecoderSkipBytes(t *testing.T) {
+	enc := NewEncoder(1)
+	enc.PutString(0, "skip-me")
+	enc.PutUint64(1, 99)
+	data := enc.Bytes()
+
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); err != nil {
+		t.Fatalf("Skip WireBytes: %v", err)
+	}
+
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	v, err := dec.Uint64()
+	requireNoError(t, err)
+	if v != 99 {
+		t.Fatalf("after skip, got %d, want 99", v)
+	}
+}
+
+func TestDecoderSkipList(t *testing.T) {
+	enc := NewEncoder(1)
+	enc.PutStringList(0, []string{"a", "b"})
+	enc.PutUint64(1, 77)
+	data := enc.Bytes()
+
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); err != nil {
+		t.Fatalf("Skip WireList: %v", err)
+	}
+
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	v, err := dec.Uint64()
+	requireNoError(t, err)
+	if v != 77 {
+		t.Fatalf("after skip, got %d, want 77", v)
+	}
+}
+
+func TestDecoderSkipBytesTruncated(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireBytes), 10, 0x01}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("Skip truncated bytes: got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderSkipListTruncated(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireList), 2, 3, 'a', 'b', 'c', 5, 'x'}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("Skip truncated list: got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderSkipFixed64Truncated(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireFixed64), 0x01, 0x02}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("Skip truncated fixed64: got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderSkipFixed8Truncated(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireFixed8)}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("Skip truncated fixed8: got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderSkipInvalidWireType(t *testing.T) {
+	enc := NewEncoder(1)
+	enc.PutUint64(0, 1)
+	dec, err := NewDecoder(enc.Bytes())
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(WireType(255)); !errors.Is(err, ErrInvalidWireType) {
+		t.Fatalf("Skip invalid wire type: got %v, want ErrInvalidWireType", err)
+	}
+}
+
+// overflowVarint produces an invalid varint (11 continuation bytes) that causes
+// binary.Uvarint to return n < 0.
+var overflowVarint = []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80}
+
+func TestDecoderBytesVarintOverflow(t *testing.T) {
+	// Header: version=1, fields=1, tag=WireBytes, then overflow varint as length.
+	data := append([]byte{1, 1, MakeTag(0, WireBytes)}, overflowVarint...)
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.Bytes()
+	if !errors.Is(err, ErrVarintOverflow) {
+		t.Fatalf("got %v, want ErrVarintOverflow", err)
+	}
+}
+
+func TestDecoderStringListVarintOverflow(t *testing.T) {
+	// WireList with overflow varint as count.
+	data := append([]byte{1, 1, MakeTag(0, WireList)}, overflowVarint...)
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.StringList()
+	if !errors.Is(err, ErrVarintOverflow) {
+		t.Fatalf("got %v, want ErrVarintOverflow", err)
+	}
+}
+
+func TestDecoderStringListInnerVarintOverflow(t *testing.T) {
+	// WireList: count=1, then overflow varint for string length.
+	data := append([]byte{1, 1, MakeTag(0, WireList), 1}, overflowVarint...)
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.StringList()
+	if !errors.Is(err, ErrVarintOverflow) {
+		t.Fatalf("got %v, want ErrVarintOverflow", err)
+	}
+}
+
+func TestDecoderSkipBytesVarintOverflow(t *testing.T) {
+	data := append([]byte{1, 1, MakeTag(0, WireBytes)}, overflowVarint...)
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); !errors.Is(err, ErrVarintOverflow) {
+		t.Fatalf("got %v, want ErrVarintOverflow", err)
+	}
+}
+
+func TestDecoderSkipListVarintOverflow(t *testing.T) {
+	data := append([]byte{1, 1, MakeTag(0, WireList)}, overflowVarint...)
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); !errors.Is(err, ErrVarintOverflow) {
+		t.Fatalf("got %v, want ErrVarintOverflow", err)
+	}
+}
+
+func TestDecoderSkipListInnerVarintOverflow(t *testing.T) {
+	// WireList: count=1, then overflow varint for inner element length.
+	data := append([]byte{1, 1, MakeTag(0, WireList), 1}, overflowVarint...)
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	if err := dec.Skip(wt); !errors.Is(err, ErrVarintOverflow) {
+		t.Fatalf("got %v, want ErrVarintOverflow", err)
+	}
+}
+
+func TestDecoderNextInvalidWireType(t *testing.T) {
+	// Create a tag with an invalid wire type (7 is beyond maxWireType=4).
+	data := []byte{1, 1, MakeTag(0, WireType(7))}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	if !errors.Is(err, ErrInvalidWireType) {
+		t.Fatalf("got %v, want ErrInvalidWireType", err)
+	}
+}
+
+func TestDecoderBytesEmptyVarint(t *testing.T) {
+	// Tag says WireBytes but buffer ends immediately after the tag → n == 0.
+	data := []byte{1, 1, MakeTag(0, WireBytes)}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.Bytes()
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderStringListEmptyVarint(t *testing.T) {
+	// Tag says WireList but buffer ends immediately after the tag → n == 0 for count.
+	data := []byte{1, 1, MakeTag(0, WireList)}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.StringList()
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderStringListInnerEmptyVarint(t *testing.T) {
+	// List count = 1, but inner string length varint is truncated (empty).
+	data := []byte{1, 1, MakeTag(0, WireList), 1} // count=1, then no data for inner length
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, _, err = dec.Next()
+	requireNoError(t, err)
+	_, err = dec.StringList()
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderSkipBytesEmptyVarint(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireBytes)}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	err = dec.Skip(wt)
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}
+
+func TestDecoderSkipListEmptyVarint(t *testing.T) {
+	data := []byte{1, 1, MakeTag(0, WireList)}
+	dec, err := NewDecoder(data)
+	requireNoError(t, err)
+	_, wt, err := dec.Next()
+	requireNoError(t, err)
+	err = dec.Skip(wt)
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want ErrUnexpectedEOF", err)
+	}
+}

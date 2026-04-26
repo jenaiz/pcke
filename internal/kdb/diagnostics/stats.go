@@ -47,6 +47,7 @@ type Stats struct {
 	Generation     uint64 `json:"generation"`
 	FreelistRoot   uint64 `json:"freelist_root"`
 	FreelistFormat uint8  `json:"freelist_format"`
+	SchemaVersion  uint16 `json:"schema_version"`
 }
 
 // JSON returns the Stats marshalled as indented JSON.

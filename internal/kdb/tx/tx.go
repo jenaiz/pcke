@@ -60,14 +60,22 @@ func (tx *ReadTx) Close() {
 }
 
 // WriteTx provides read-write access to the B+tree with WAL integration.
+//
+// When groupCommit is true, WAL writes are deferred until Commit, reducing
+// the number of fsyncs from N+1 (one per Put/Delete plus commit marker)
+// to 1 (a single BatchAppend at commit time). This trades crash-safety
+// of individual operations for significantly higher throughput on workloads
+// with many small writes per transaction.
 type WriteTx struct {
 	ReadTx
-	wal       *wal.WAL
-	pool      *bufpool.Pool
-	committed bool
+	wal         *wal.WAL
+	pool        *bufpool.Pool
+	committed   bool
+	groupCommit bool              // defer WAL writes until Commit
+	pending     []wal.BatchRecord // buffered WAL records (group commit)
 }
 
-// NewWriteTx creates a read-write transaction.
+// NewWriteTx creates a read-write transaction with per-operation WAL writes.
 func NewWriteTx(tree *btree.Tree, w *wal.WAL, pool *bufpool.Pool) *WriteTx {
 	return &WriteTx{
 		ReadTx: ReadTx{tree: tree},
@@ -76,62 +84,111 @@ func NewWriteTx(tree *btree.Tree, w *wal.WAL, pool *bufpool.Pool) *WriteTx {
 	}
 }
 
+// NewGroupCommitTx creates a read-write transaction that defers WAL writes
+// until Commit. All Put/Delete operations are buffered and written in a
+// single batch with one fsync, reducing sync overhead by ≥ 2x on workloads
+// with many small writes per transaction.
+func NewGroupCommitTx(tree *btree.Tree, w *wal.WAL, pool *bufpool.Pool) *WriteTx {
+	return &WriteTx{
+		ReadTx:      ReadTx{tree: tree},
+		wal:         w,
+		pool:        pool,
+		groupCommit: true,
+		pending:     make([]wal.BatchRecord, 0, 64),
+	}
+}
+
 // Put inserts or updates a key-value pair. The operation is logged to the WAL
-// before mutating the B+tree.
+// before mutating the B+tree. In group-commit mode, the WAL write is deferred
+// until Commit.
 func (tx *WriteTx) Put(key, value []byte) error {
 	if tx.closed {
 		return ErrTxClosed
 	}
 
-	checkCrashHook("tx-pre-wal-insert")
-
-	// WAL: log the insert.
 	payload := encodeKV(key, value)
-	if _, err := tx.wal.Append(wal.TypeInsert, payload); err != nil {
-		return err
-	}
 
-	checkCrashHook("tx-post-wal-insert")
+	if tx.groupCommit {
+		tx.pending = append(tx.pending, wal.BatchRecord{
+			Type:    wal.TypeInsert,
+			Payload: payload,
+		})
+	} else {
+		checkCrashHook("tx-pre-wal-insert")
+
+		if _, err := tx.wal.Append(wal.TypeInsert, payload); err != nil {
+			return err
+		}
+
+		checkCrashHook("tx-post-wal-insert")
+	}
 
 	return tx.tree.Put(key, value)
 }
 
 // Delete removes a key. The operation is logged to the WAL before mutating.
+// In group-commit mode, the WAL write is deferred until Commit.
 func (tx *WriteTx) Delete(key []byte) error {
 	if tx.closed {
 		return ErrTxClosed
 	}
 
-	checkCrashHook("tx-pre-wal-delete")
+	if tx.groupCommit {
+		keyCopy := make([]byte, len(key))
+		copy(keyCopy, key)
+		tx.pending = append(tx.pending, wal.BatchRecord{
+			Type:    wal.TypeDelete,
+			Payload: keyCopy,
+		})
+	} else {
+		checkCrashHook("tx-pre-wal-delete")
 
-	// WAL: log the delete.
-	if _, err := tx.wal.Append(wal.TypeDelete, key); err != nil {
-		return err
+		if _, err := tx.wal.Append(wal.TypeDelete, key); err != nil {
+			return err
+		}
+
+		checkCrashHook("tx-post-wal-delete")
 	}
-
-	checkCrashHook("tx-post-wal-delete")
 
 	return tx.tree.Delete(key)
 }
 
 // Commit flushes dirty pages, writes a WAL commit record, and returns.
 // The caller (DB.Update) handles the meta swap.
+//
+// In group-commit mode, all deferred WAL records plus the commit marker
+// are written in a single BatchAppend with one fsync.
 func (tx *WriteTx) Commit() error {
 	if tx.closed {
 		return ErrTxClosed
 	}
 
-	checkCrashHook("tx-pre-wal-commit")
+	if tx.groupCommit {
+		// Append commit marker to the pending batch.
+		tx.pending = append(tx.pending, wal.BatchRecord{
+			Type:    wal.TypeCommit,
+			Payload: nil,
+		})
 
-	// WAL commit marker.
-	if _, err := tx.wal.Append(wal.TypeCommit, nil); err != nil {
-		return err
+		checkCrashHook("tx-pre-wal-commit")
+
+		if _, err := tx.wal.BatchAppend(tx.pending); err != nil {
+			return err
+		}
+
+		checkCrashHook("tx-post-wal-commit")
+	} else {
+		checkCrashHook("tx-pre-wal-commit")
+
+		if _, err := tx.wal.Append(wal.TypeCommit, nil); err != nil {
+			return err
+		}
+
+		checkCrashHook("tx-post-wal-commit")
 	}
 
-	checkCrashHook("tx-post-wal-commit")
 	checkCrashHook("tx-pre-flush")
 
-	// Flush all dirty pages to disk.
 	if err := tx.pool.FlushDirty(); err != nil {
 		return err
 	}

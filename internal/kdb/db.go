@@ -54,6 +54,11 @@ type Options struct {
 	// ReadOnly opens the database in read-only mode (not yet implemented;
 	// reserved for future use).
 	ReadOnly bool
+
+	// GroupCommit enables deferred WAL writes within transactions. When true,
+	// Put/Delete operations buffer WAL records and write them in a single
+	// batch at commit time, reducing the number of fsyncs by ≥ 2x.
+	GroupCommit bool
 }
 
 // DB represents an open kdb database.
@@ -65,10 +70,12 @@ type DB struct {
 	flock   *lock.FileLock
 	wal     *wal.WAL
 	pool    *bufpool.Pool
+	dynPool *bufpool.DynamicPool // adaptive sizing wrapper
 	fl      *freelist.BTreeFreelist
 	tree    *btree.Tree
 	meta    *Meta
 	closed  bool
+	opts    Options
 	modIdx  *index.SecondaryIndex // by_module secondary index
 	tagIdx  *index.SecondaryIndex // by_tag secondary index
 	fileIdx *index.SecondaryIndex // by_file secondary index
@@ -86,7 +93,10 @@ type DB struct {
 //
 // Passing nil for opts uses default options.
 func Open(path string, opts *Options) (*DB, error) {
-	_ = opts // reserved for future use
+	var o Options
+	if opts != nil {
+		o = *opts
+	}
 
 	dir := filepath.Join(path, dirName)
 	if err := os.MkdirAll(dir, dirPerms); err != nil {
@@ -112,6 +122,7 @@ func Open(path string, opts *Options) (*DB, error) {
 		dir:   dir,
 		file:  f,
 		flock: fl,
+		opts:  o,
 	}
 
 	// Initialise a new database with one growth chunk if the file is empty.
@@ -175,6 +186,7 @@ func (db *DB) Close() error {
 	db.flock = nil
 	db.wal = nil
 	db.pool = nil
+	db.dynPool = nil
 	db.fl = nil
 	db.tree = nil
 	db.modIdx = nil
@@ -350,6 +362,7 @@ func (db *DB) wireSubsystems() error {
 	// Create PageIO adapter and buffer pool.
 	pio := NewFilePageIO(db.file)
 	db.pool = bufpool.New(pio, 256)
+	db.dynPool = bufpool.NewDynamic(db.pool, nil)
 
 	// Set up freelist (B+tree format).
 	if err := db.setupFreelist(m, pio); err != nil {
@@ -404,6 +417,7 @@ func (db *DB) postReplayCommit() error {
 		PageCount:       uint64(info.Size() / pageSize), //nolint:gosec // G115
 		FreelistRoot:    db.fl.Root(),
 		FreelistFormat:  FreelistBTree,
+		SchemaVersion:   db.meta.SchemaVersion,
 		TreeRoot:        db.tree.Root(),
 		ModuleIndexRoot: db.modIdx.Root(),
 		TagIndexRoot:    db.tagIdx.Root(),
@@ -450,6 +464,7 @@ func (db *DB) persistMigration(m *Meta) error {
 		PageCount:      m.PageCount,
 		FreelistRoot:   db.fl.Root(),
 		FreelistFormat: FreelistBTree,
+		SchemaVersion:  m.SchemaVersion,
 		TreeRoot:       0, // No tree yet during migration.
 	}
 	if err := swapMeta(db.file, newMeta); err != nil {
@@ -619,6 +634,9 @@ func (db *DB) Checkpoint(_ context.Context) error {
 		return fmt.Errorf("kdb: checkpoint remove old wal segments: %w", err)
 	}
 
+	// Sample the buffer pool hit rate for adaptive sizing.
+	db.dynPool.Sample()
+
 	checkCrashHook("db-checkpoint-post-truncate")
 
 	return nil
@@ -640,9 +658,15 @@ func (db *DB) Update(_ context.Context, fn func(*tx.WriteTx) error) error {
 	tree := db.tree
 	w := db.wal
 	pool := db.pool
+	groupCommit := db.opts.GroupCommit
 	db.mu.Unlock()
 
-	wtx := tx.NewWriteTx(tree, w, pool)
+	var wtx *tx.WriteTx
+	if groupCommit {
+		wtx = tx.NewGroupCommitTx(tree, w, pool)
+	} else {
+		wtx = tx.NewWriteTx(tree, w, pool)
+	}
 
 	if err := fn(wtx); err != nil {
 		wtx.Rollback()
@@ -653,6 +677,9 @@ func (db *DB) Update(_ context.Context, fn func(*tx.WriteTx) error) error {
 		wtx.Rollback()
 		return fmt.Errorf("kdb: commit: %w", err)
 	}
+
+	// Sample the buffer pool hit rate for adaptive sizing.
+	db.dynPool.Sample()
 
 	// Swap meta with new generation.
 	return db.commitMeta()
@@ -676,6 +703,7 @@ func (db *DB) commitMeta() error {
 		PageCount:       uint64(info.Size() / pageSize), //nolint:gosec // G115: file size is always positive.
 		FreelistRoot:    db.fl.Root(),
 		FreelistFormat:  FreelistBTree,
+		SchemaVersion:   db.meta.SchemaVersion,
 		TreeRoot:        db.tree.Root(),
 		ModuleIndexRoot: db.modIdx.Root(),
 		TagIndexRoot:    db.tagIdx.Root(),
@@ -792,6 +820,7 @@ func (db *DB) Stats() (diagnostics.Stats, error) {
 	s.Generation = m.Generation
 	s.FreelistRoot = m.FreelistRoot
 	s.FreelistFormat = uint8(m.FreelistFormat)
+	s.SchemaVersion = m.SchemaVersion
 
 	return s, nil
 }
@@ -822,3 +851,18 @@ func (db *DB) FileIndex() *index.SecondaryIndex { return db.fileIdx }
 // The caller must only mutate the index while holding the write lock
 // (i.e., inside an Update callback).
 func (db *DB) TypeIndex() *index.SecondaryIndex { return db.typeIdx }
+
+// SchemaVersion returns the current schema version stored in the meta page.
+func (db *DB) SchemaVersion() uint16 {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.meta.SchemaVersion
+}
+
+// SetSchemaVersion updates the schema version in the meta page. This should
+// only be called by the migration engine after applying a migration.
+func (db *DB) SetSchemaVersion(v uint16) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.meta.SchemaVersion = v
+}

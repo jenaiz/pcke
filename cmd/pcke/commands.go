@@ -13,6 +13,7 @@ import (
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/index/fts"
+	"github.com/jenaiz/pcke/internal/kdb/migrate"
 	kdbquery "github.com/jenaiz/pcke/internal/kdb/query"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/output"
@@ -494,4 +495,60 @@ func printText(rs *query.ResultSet) error {
 	}
 	fmt.Printf("\n%d result(s)\n", len(rs.Rows))
 	return nil
+}
+
+func newMigrateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "migrate",
+		Short: "Run schema migrations on the knowledge base",
+		Long: `Run schema migrations on the knowledge base.
+
+Migrations are versioned, chunked (safe for large databases), and idempotent
+(running twice has the same effect as running once).`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("migrate: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("migrate: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			ctx := context.Background()
+			engine := migrate.New()
+			registerMigrations(engine)
+
+			before := db.SchemaVersion()
+			applied, err := engine.Run(ctx, db)
+			if err != nil {
+				return fmt.Errorf("migrate: %w", err)
+			}
+
+			if applied == 0 {
+				fmt.Printf("Database is up to date (schema version %d).\n", before)
+			} else {
+				fmt.Printf("Applied %d migration(s): version %d → %d.\n",
+					applied, before, db.SchemaVersion())
+			}
+
+			return nil
+		},
+	}
+}
+
+// registerMigrations adds all known schema migrations to the engine.
+// New migrations should be appended here as pcke evolves.
+func registerMigrations(e *migrate.Engine) {
+	// No migrations yet — the initial schema (version 0) is the baseline.
+	// Future migrations will be registered here:
+	//
+	// e.Register(migrate.Migration{
+	//     Version:     1,
+	//     Description: "add foo index",
+	//     Migrate:     migrateV1AddFooIndex,
+	// })
+	_ = e
 }

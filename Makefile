@@ -80,6 +80,11 @@ fuzz: ## Run all fuzz targets for FUZZTIME (default 30s each)
 bench: ## Run benchmarks (pattern in BENCH; default '.')
 	$(GO) test -run=^$$ -bench=$${BENCH:-.} -benchmem -count=$${BENCHCOUNT:-3} $(PKG)
 
+.PHONY: bench-compare
+bench-compare: ## Compare benchmarks against baseline (reject > 10% regression)
+	$(GO) test -run=^$$ -bench=BenchmarkCritical -benchmem -count=5 $(PKG) > bench-new.txt
+	benchstat bench-baseline.txt bench-new.txt
+
 # ---------------------------------------------------------------------------
 # Lint / Format
 # ---------------------------------------------------------------------------
@@ -120,8 +125,8 @@ verify-phase-3: ## Run Phase 3 DoD (not implemented yet)
 	@echo "verify-phase-3: not implemented yet — Phase 3 not started." && exit 1
 
 .PHONY: verify-phase-4
-verify-phase-4: ## Run Phase 4 DoD (not implemented yet)
-	@echo "verify-phase-4: not implemented yet — Phase 4 not started." && exit 1
+verify-phase-4: tools-check lint test test-race test-debug build ## Phase 4 DoD: lint + test + race + debug + build
+	@echo "✓ verify-phase-4: all gates passed."
 
 # ---------------------------------------------------------------------------
 # Release

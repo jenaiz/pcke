@@ -619,3 +619,159 @@ func TestHitRateStats(t *testing.T) {
 		t.Errorf("HitRate = %f, want 0.5", stats.HitRate)
 	}
 }
+
+// failingPageIO wraps memPageIO but injects errors on demand.
+type failingPageIO struct {
+	*memPageIO
+	failReads  bool
+	failWrites bool
+	failSync   bool
+}
+
+func (f *failingPageIO) ReadPage(pageID uint64) ([]byte, error) {
+	if f.failReads {
+		return nil, fmt.Errorf("injected read error")
+	}
+	return f.memPageIO.ReadPage(pageID)
+}
+
+func (f *failingPageIO) WritePage(pageID uint64, buf []byte) error {
+	if f.failWrites {
+		return fmt.Errorf("injected write error")
+	}
+	return f.memPageIO.WritePage(pageID, buf)
+}
+
+func (f *failingPageIO) Sync() error {
+	if f.failSync {
+		return fmt.Errorf("injected sync error")
+	}
+	return f.memPageIO.Sync()
+}
+
+func TestPinReadError(t *testing.T) {
+	fio := &failingPageIO{memPageIO: newMemPageIO()}
+	pool := bufpool.New(fio, 16)
+
+	// Reading a non-existent page returns error from memPageIO.
+	_, err := pool.Pin(999)
+	if err == nil {
+		t.Fatal("expected error on Pin with missing page")
+	}
+
+	// Now inject read errors for existing pages.
+	fio.initPage(1, page.TypeLeaf)
+	fio.failReads = true
+	_, err = pool.Pin(1)
+	if err == nil {
+		t.Fatal("expected error on Pin with read failure")
+	}
+}
+
+func TestFlushDirtyWriteError(t *testing.T) {
+	fio := &failingPageIO{memPageIO: newMemPageIO()}
+	fio.initPage(1, page.TypeLeaf)
+	pool := bufpool.New(fio, 16)
+
+	f, err := pool.Pin(1)
+	if err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	f.Buf[0] = 0xFF // modify
+	pool.MarkDirty(1)
+	pool.Unpin(1)
+
+	fio.failWrites = true
+	if err := pool.FlushDirty(); err == nil {
+		t.Fatal("expected error on FlushDirty with write failure")
+	}
+}
+
+func TestFlushDirtySyncError(t *testing.T) {
+	fio := &failingPageIO{memPageIO: newMemPageIO()}
+	fio.initPage(1, page.TypeLeaf)
+	pool := bufpool.New(fio, 16)
+
+	f, err := pool.Pin(1)
+	if err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	f.Buf[0] = 0xFF
+	pool.MarkDirty(1)
+	pool.Unpin(1)
+
+	fio.failSync = true
+	if err := pool.FlushDirty(); err == nil {
+		t.Fatal("expected error on FlushDirty with sync failure")
+	}
+}
+
+func TestEvictDirtyWriteError(t *testing.T) {
+	fio := &failingPageIO{memPageIO: newMemPageIO()}
+	// Small pool: 2 pages.
+	for i := uint64(1); i <= 3; i++ {
+		fio.initPage(i, page.TypeLeaf)
+	}
+	pool := bufpool.New(fio, 2)
+
+	// Fill pool with 2 pages, mark one dirty.
+	f1, _ := pool.Pin(1)
+	f1.Buf[0] = 0xFF
+	pool.MarkDirty(1)
+	pool.Unpin(1)
+
+	_, _ = pool.Pin(2)
+	pool.Unpin(2)
+
+	// Now trigger eviction by pinning a 3rd page, but fail the dirty write.
+	fio.failWrites = true
+	_, err := pool.Pin(3)
+	if err == nil {
+		t.Fatal("expected error on evict with write failure")
+	}
+}
+
+func TestFlushPageWriteError(t *testing.T) {
+	fio := &failingPageIO{memPageIO: newMemPageIO()}
+	fio.initPage(1, page.TypeLeaf)
+	pool := bufpool.New(fio, 16)
+
+	f, err := pool.Pin(1)
+	if err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	f.Buf[0] = 0xFF
+	pool.MarkDirty(1)
+	pool.Unpin(1)
+
+	fio.failWrites = true
+	if err := pool.FlushPage(1); err == nil {
+		t.Fatal("expected error on FlushPage with write failure")
+	}
+}
+
+func TestFlushPageNotInPool(t *testing.T) {
+	pool := bufpool.New(newMemPageIO(), 16)
+	// FlushPage for a page not in the pool should return nil.
+	if err := pool.FlushPage(999); err != nil {
+		t.Fatalf("FlushPage(999): %v", err)
+	}
+}
+
+func TestFlushPageClean(t *testing.T) {
+	io := newMemPageIO()
+	io.initPage(1, page.TypeLeaf)
+	pool := bufpool.New(io, 16)
+
+	// Pin and unpin without marking dirty.
+	_, err := pool.Pin(1)
+	if err != nil {
+		t.Fatalf("Pin: %v", err)
+	}
+	pool.Unpin(1)
+
+	// FlushPage on a clean page should be a no-op.
+	if err := pool.FlushPage(1); err != nil {
+		t.Fatalf("FlushPage(clean): %v", err)
+	}
+}

@@ -1,6 +1,6 @@
 # pcke — Project Context & Knowledge Engine
 
-> **Status: pre-alpha** (Phase 2 — deep analysis & MCP)
+> **Status: v1.0** (all phases complete)
 
 **pcke** is a Long-Term Engineering Memory — a local system that extracts
 knowledge from codebases and serves it to AI coding agents (GitHub Copilot,
@@ -112,6 +112,7 @@ cd /path/to/your-project
 | [PRD v3.1](PRDs/PRD_PCKE_v3_1.md) | Architecture & design decisions (what/why) |
 | [Execution Plan](PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md) | Implementation plan (how/when) |
 | [Architecture notes](docs/architecture.md) | Build tags, component map, operational notes |
+| [Documentation site](docs/index.md) | Getting started, API reference, query language, annotations |
 | [Contributing](CONTRIBUTING.md) | Dev workflow, conventions, CI gates |
 
 ## Project phases
@@ -122,8 +123,8 @@ cd /path/to/your-project
 | 0 | Storage engine + CLI scan/sync | **complete** |
 | 1 | Search & checkpointing | **complete** |
 | 2 | Deep analysis & MCP | **complete** |
-| 3 | Query language & polish | not started |
-| 4 | v1.0 | not started |
+| 3 | Query language & polish | **complete** |
+| 4 | v1.0 | **complete** |
 
 ## What's implemented
 
@@ -134,12 +135,13 @@ A crash-safe embedded key-value store built from scratch:
 - **B+tree** — Get/Put/Delete with 50/50 leaf splits, merge/redistribution on delete, overflow pages, and cursor iteration.
 - **Write-Ahead Log (WAL)** — Append-only with CRC32C per record, fsync, segment rotation, and linear replay on open.
 - **Checkpoint** — Fuzzy checkpoint flushes dirty pages and rotates WAL segments.
-- **Buffer pool** — Pin/unpin page cache with clock-sweep eviction and hit rate tracking (≥ 85% target).
+- **Buffer pool** — Pin/unpin page cache with clock-sweep eviction, adaptive sizing (> 90% hit rate target).
 - **Freelist** — B+tree-backed page allocator (migrated from linked-list bootstrap).
 - **Double-meta pages** — Atomic generation-based swap for crash recovery.
-- **Transactions** — `View` (concurrent readers) and `Update` (exclusive writer) with WAL-first mutation, auto-commit, and meta swap.
+- **Transactions** — `View` (concurrent readers) and `Update` (exclusive writer) with WAL-first mutation, group commit, auto-commit, and meta swap.
 - **CoW snapshot isolation** — readers see a consistent snapshot without blocking writers.
 - **Secondary indexes** — by_module, by_tag, by_file, by_type for fast lookups.
+- **Schema migrations** — versioned, idempotent, chunked (`pcke migrate`).
 - **Offline compaction** — `pcke compact` copies live keys to a fresh file, reclaiming space.
 - **Binary encoding** — Varint, little-endian, CRC32C, tagged record schema v1.
 - **File locking** — Cross-platform `flock` with LOCK/PID single-process guard.
@@ -176,11 +178,38 @@ pcke recall "error handling strategy"
 
 ### CLI (`cmd/pcke`)
 
-Cobra-based with subcommands: `init`, `scan`, `scan --deep`, `sync`, `rule`, `note`, `status`, `modules`, `diagnostics`, `config`, `recall`, `compact`, `serve`.
+Cobra-based with subcommands: `init`, `scan`, `scan --deep`, `sync`, `rule`, `note`, `status`, `modules`, `diagnostics`, `config`, `recall`, `compact`, `serve`, `query`, `explain`, `export`, `migrate`.
 
 ### Configuration (`internal/config`)
 
 Layered TOML config: CLI flags > environment > repo-level > user-level > defaults.
+
+### Performance
+
+pcke is designed for fast, low-overhead operation on real-world codebases:
+
+| Metric | Target | Verified |
+|--------|--------|----------|
+| Incremental scan (10K files, no changes) | < 500 ms | ✓ |
+| Full scan (10K files, cold) | < 10 s | ✓ |
+| FTS query latency (p99, 10K nodes) | < 50 ms | ✓ |
+| Binary size (stripped) | < 30 MB | ✓ |
+| Memory peak (full scan, 10K files) | < 200 MB | ✓ |
+| Buffer pool hit rate (steady-state) | > 90% | ✓ |
+
+Benchmarks run on every commit via `BenchmarkCritical*` with a 10% regression gate.
+
+### Schema Migrations
+
+When pcke's internal storage format changes between versions, the `migrate`
+command handles the upgrade:
+
+```bash
+pcke migrate
+```
+
+Migrations are versioned, chunked (safe for large databases), and idempotent
+(running twice has the same effect as running once).
 
 ## License
 

@@ -173,6 +173,30 @@ func TestTokenizeCodeSnippet(t *testing.T) {
 	assertContains(t, terms, "error")
 }
 
+func TestTokenizeMixedCJKCompound(t *testing.T) {
+	// Mixed CJK text with camelCase compound words — triggers tokenizeMixed's
+	// compound split path for non-CJK runs within CJK text.
+	text := "東京handleHTTPRequest北京"
+	tokens := fts.Tokenize(text)
+	terms := extractTerms(tokens)
+
+	assertContains(t, terms, "handle")
+	assertContains(t, terms, "http")
+	assertContains(t, terms, "request")
+	// Should also have CJK bigrams.
+	if len(tokens) < 5 {
+		t.Errorf("expected >= 5 tokens, got %d: %v", len(tokens), terms)
+	}
+}
+
+func TestTokenizeNullByte(t *testing.T) {
+	// Ensure tokenizer doesn't panic on null bytes.
+	tokens := fts.Tokenize("hello\x00world")
+	if len(tokens) == 0 {
+		t.Error("expected some tokens from null-containing string")
+	}
+}
+
 func FuzzTokenizer(f *testing.F) {
 	f.Add("hello world")
 	f.Add("parseJSON")
