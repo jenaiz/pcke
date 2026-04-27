@@ -105,6 +105,30 @@ cd /path/to/your-project
 | `pcke://constraints` | Rendered constraints and conventions |
 | `pcke://decisions` | Rendered design decisions and ADRs |
 
+### Advanced MCP Features (v1.1)
+
+pcke v1.1 introduces advanced MCP capabilities for richer AI agent integration:
+
+- **Streaming responses.** Large query results are delivered progressively,
+  so agents can start processing before the full result set is ready.
+- **Subscriptions.** Agents can subscribe to knowledge base changes and
+  receive real-time notifications when `pcke scan` completes or rules are
+  updated.
+- **Prompt templates.** Pre-built context packages (`onboarding`, `review`,
+  `debug`, `refactor`) that combine architecture, conventions, and decisions
+  into a single prompt-ready payload.
+- **Proactive context.** (opt-in) pcke can suggest relevant constraints and
+  history when an agent queries a module, without being explicitly asked.
+
+Enable advanced features in `.pcke/config.toml`:
+
+```toml
+[mcp]
+proactive_context = true
+```
+
+See [Advanced MCP documentation](docs/advanced-mcp.md) for details.
+
 ## Documentation
 
 | Document | Purpose |
@@ -125,6 +149,7 @@ cd /path/to/your-project
 | 2 | Deep analysis & MCP | **complete** |
 | 3 | Query language & polish | **complete** |
 | 4 | v1.0 | **complete** |
+| 5 | Advanced MCP (v1.1) | **complete** |
 
 ## What's implemented
 

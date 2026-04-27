@@ -50,7 +50,10 @@ type FTSConfig struct {
 
 // MCPConfig holds MCP server settings.
 type MCPConfig struct {
-	ReadTimeoutS int `toml:"read_timeout_sec"`
+	ReadTimeoutS     int  `toml:"read_timeout_sec"`
+	ProactiveContext bool `toml:"proactive_context"`
+	StreamThreshold  int  `toml:"stream_threshold"`
+	ChunkSize        int  `toml:"chunk_size"`
 }
 
 // Defaults returns a Config populated with default values.
@@ -169,6 +172,15 @@ func mergeFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("PCKE_MCP_READ_TIMEOUT_SEC"); v != "" {
 		cfg.MCP.ReadTimeoutS = envInt(v, cfg.MCP.ReadTimeoutS)
+	}
+	if v := os.Getenv("PCKE_MCP_PROACTIVE_CONTEXT"); v != "" {
+		cfg.MCP.ProactiveContext = envBool(v, cfg.MCP.ProactiveContext)
+	}
+	if v := os.Getenv("PCKE_MCP_STREAM_THRESHOLD"); v != "" {
+		cfg.MCP.StreamThreshold = envInt(v, cfg.MCP.StreamThreshold)
+	}
+	if v := os.Getenv("PCKE_MCP_CHUNK_SIZE"); v != "" {
+		cfg.MCP.ChunkSize = envInt(v, cfg.MCP.ChunkSize)
 	}
 }
 

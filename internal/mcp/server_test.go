@@ -133,9 +133,15 @@ func startTestServer(t *testing.T, db *kdb.DB) *mcptest.Server {
 	// Copy resources.
 	ts.AddServerOptions(
 		mcpserver.WithResourceCapabilities(true, false),
+		mcpserver.WithPromptCapabilities(false),
 	)
 	for _, sr := range srv.ServerResources() {
 		ts.AddResource(sr.Resource, sr.Handler)
+	}
+
+	// Copy prompts.
+	for _, sp := range srv.ServerPrompts() {
+		ts.AddPrompt(sp.Prompt, sp.Handler)
 	}
 
 	ctx := context.Background()

@@ -22,23 +22,27 @@ type Server struct {
 	db        *kdb.DB
 	srv       *mcpserver.MCPServer
 	resources []mcpserver.ServerResource
+	prompts   []mcpserver.ServerPrompt
+	broker    *Broker
 }
 
 // New creates a [Server] backed by the given kdb database.
 // All tools and resources are read-only.
 func New(db *kdb.DB) *Server {
-	s := &Server{db: db}
+	s := &Server{db: db, broker: NewBroker()}
 
 	s.srv = mcpserver.NewMCPServer(
 		"pcke",
 		"0.2.0",
 		mcpserver.WithToolCapabilities(false),
 		mcpserver.WithResourceCapabilities(true, false),
+		mcpserver.WithPromptCapabilities(false),
 		mcpserver.WithRecovery(),
 	)
 
 	s.registerTools()
 	s.registerResources()
+	s.registerPrompts()
 
 	return s
 }
@@ -54,9 +58,29 @@ func (s *Server) MCPServer() *mcpserver.MCPServer {
 	return s.srv
 }
 
+// Broker returns the event broker for subscribing to knowledge base changes.
+func (s *Server) Broker() *Broker {
+	return s.broker
+}
+
+// NotifyEvent publishes an event to local subscribers and broadcasts a
+// JSON-RPC notification to all connected MCP clients.
+func (s *Server) NotifyEvent(event Event) {
+	s.broker.Publish(event)
+	s.srv.SendNotificationToAllClients("notifications/knowledge/changed", map[string]any{
+		"type":   string(event.Type),
+		"detail": event.Detail,
+	})
+}
+
 // ServerResources returns the registered MCP resources for testing.
 func (s *Server) ServerResources() []mcpserver.ServerResource {
 	return s.resources
+}
+
+// ServerPrompts returns the registered MCP prompts for testing.
+func (s *Server) ServerPrompts() []mcpserver.ServerPrompt {
+	return s.prompts
 }
 
 // loadNodes reads all active knowledge nodes from the database.

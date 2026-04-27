@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jenaiz/pcke/internal/analysis"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -82,28 +83,7 @@ func (s *Server) handleRecall(
 	var results []scored
 
 	for _, node := range nodes {
-		text := strings.ToLower(
-			node.Name + " " + node.FilePath + " " + node.Language + " " +
-				node.Module + " " + node.Class,
-		)
-
-		score := 0
-		for _, term := range terms {
-			if strings.Contains(text, term) {
-				score++
-			}
-		}
-
-		// Also search entity names for deep-scanned nodes.
-		for _, ent := range node.Entities {
-			for _, term := range terms {
-				if strings.Contains(strings.ToLower(ent.Name), term) {
-					score += 2 // Entity name matches are weighted higher.
-				}
-			}
-		}
-
-		if score > 0 {
+		if score := scoreNode(node, terms); score > 0 {
 			results = append(results, scored{score: score, json: nodeToJSON(node)})
 		}
 	}
@@ -121,15 +101,18 @@ func (s *Server) handleRecall(
 		return mcplib.NewToolResultText("No results found."), nil
 	}
 
-	var b strings.Builder
-	for i, r := range results {
-		if i > 0 {
-			b.WriteString("\n---\n")
+	sw := NewStreamWriter(ctx, 0, 0)
+	for _, r := range results {
+		if err := sw.WriteItem(r.json); err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", err)), nil
 		}
-		b.WriteString(r.json)
 	}
 
-	return mcplib.NewToolResultText(b.String()), nil
+	text, err := sw.Flush()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", err)), nil
+	}
+	return mcplib.NewToolResultText(text), nil
 }
 
 // handleGetModuleContext returns the context for a specific module.
@@ -319,4 +302,31 @@ func (s *Server) handleGetHistory(
 	}
 
 	return mcplib.NewToolResultText(nodeToJSON(matching)), nil
+}
+
+// scoreNode computes a relevance score for a knowledge node against the
+// given search terms. Returns 0 when none of the terms match.
+func scoreNode(node analysis.KnowledgeNode, terms []string) int {
+	text := strings.ToLower(
+		node.Name + " " + node.FilePath + " " + node.Language + " " +
+			node.Module + " " + node.Class,
+	)
+
+	score := 0
+	for _, term := range terms {
+		if strings.Contains(text, term) {
+			score++
+		}
+	}
+
+	// Entity name matches are weighted higher.
+	for _, ent := range node.Entities {
+		for _, term := range terms {
+			if strings.Contains(strings.ToLower(ent.Name), term) {
+				score += 2
+			}
+		}
+	}
+
+	return score
 }

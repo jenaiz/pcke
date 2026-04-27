@@ -11,6 +11,7 @@ local knowledge base for AI assistants.
 - [Query Language](query-language.md) — DSL grammar and examples
 - [Annotations](annotations.md) — in-code `@pcke-rule` / `@pcke-lesson`
 - [Schema Migrations](schema-migrations.md) — `pcke migrate` usage
+- [Advanced MCP](advanced-mcp.md) — streaming, subscriptions, prompt templates
 
 ## Overview
 
