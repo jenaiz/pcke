@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 
 	"github.com/jenaiz/pcke/internal/analysis"
@@ -25,7 +28,28 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Initialise pcke in the current repository",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke init: not yet implemented (Phase 2)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("init: get working directory: %w", err)
+			}
+
+			// Check if already initialised.
+			pckeDir := cwd + "/.pcke"
+			if _, err := os.Stat(pckeDir); err == nil {
+				fmt.Println("pcke is already initialised in this repository.")
+				return nil
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("init: create database: %w", err)
+			}
+			_ = db.Close()
+
+			fmt.Println("Initialised pcke knowledge base in .pcke/")
+			fmt.Println("Next steps:")
+			fmt.Println("  pcke scan       Scan the repository")
+			fmt.Println("  pcke sync       Generate context files")
 			return nil
 		},
 	}
@@ -110,25 +134,115 @@ func newSyncCmd() *cobra.Command {
 }
 
 func newRuleCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "rule",
 		Short: "Manage project rules",
+		Long: `Manage project rules extracted from @pcke-rule annotations in source code.
+
+Rules are discovered during scan from in-code annotations like:
+  // @pcke-rule no-raw-sql: Never execute raw SQL; always use parameterized queries`,
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List rules extracted from source annotations",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke rule: not yet implemented (Phase 2)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("rule list: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("rule list: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+			warnBranchMismatch(db, cwd)
+
+			nodes, err := output.LoadNodes(context.Background(), db)
+			if err != nil {
+				return fmt.Errorf("rule list: load nodes: %w", err)
+			}
+
+			var count int
+			for _, n := range nodes {
+				if n.Type == "rule" {
+					count++
+					fmt.Printf("  %s  (%s)\n", n.Name, n.FilePath)
+				}
+			}
+			if count == 0 {
+				fmt.Println("No rules found. Add @pcke-rule annotations to your source files and run pcke scan.")
+			} else {
+				fmt.Printf("\n%d rule(s)\n", count)
+			}
 			return nil
 		},
-	}
+	})
+
+	return cmd
 }
 
 func newNoteCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "note",
 		Short: "Manage project notes",
+		Long: `Manage project notes stored in the knowledge base.
+
+Notes can be queried with: pcke query "notes where tags contains 'decision'"`,
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List notes in the knowledge base",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke note: not yet implemented (Phase 2)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("note list: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("note list: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+			warnBranchMismatch(db, cwd)
+
+			var count int
+			if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+				prefix := []byte("note:")
+				c := rtx.Cursor()
+				for ok := c.Seek(prefix); ok; ok = c.Next() {
+					if !strings.HasPrefix(string(c.Key()), "note:") {
+						break
+					}
+					var m map[string]any
+					if err := json.Unmarshal(c.Value(), &m); err != nil {
+						continue
+					}
+					count++
+					id, _ := m["id"].(string)
+					content, _ := m["content"].(string)
+					if len(content) > 80 {
+						content = content[:80] + "..."
+					}
+					fmt.Printf("  %s: %s\n", id, content)
+				}
+				return nil
+			}); err != nil {
+				return fmt.Errorf("note list: %w", err)
+			}
+
+			if count == 0 {
+				fmt.Println("No notes found.")
+			} else {
+				fmt.Printf("\n%d note(s)\n", count)
+			}
 			return nil
 		},
-	}
+	})
+
+	return cmd
 }
 
 func newStatusCmd() *cobra.Command {
@@ -136,7 +250,34 @@ func newStatusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show knowledge base status",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke status: not yet implemented (Phase 2)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("status: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("status: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+			warnBranchMismatch(db, cwd)
+
+			stats, err := db.Stats()
+			if err != nil {
+				return fmt.Errorf("status: gather stats: %w", err)
+			}
+
+			nodes, err := output.LoadNodes(context.Background(), db)
+			if err != nil {
+				return fmt.Errorf("status: load nodes: %w", err)
+			}
+
+			fmt.Printf("Knowledge base: .pcke/data.kdb\n")
+			fmt.Printf("  Schema version:  %d\n", stats.SchemaVersion)
+			fmt.Printf("  Total keys:      %d\n", stats.KeyCount)
+			fmt.Printf("  Knowledge nodes: %d\n", len(nodes))
+			fmt.Printf("  Data file size:  %d bytes\n", stats.DataFileBytes)
+			fmt.Printf("  Tree depth:      %d\n", stats.TreeDepth)
 			return nil
 		},
 	}
@@ -147,7 +288,46 @@ func newModulesCmd() *cobra.Command {
 		Use:   "modules",
 		Short: "List detected modules",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("pcke modules: not yet implemented (Phase 2)")
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("modules: get working directory: %w", err)
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("modules: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+			warnBranchMismatch(db, cwd)
+
+			nodes, err := output.LoadNodes(context.Background(), db)
+			if err != nil {
+				return fmt.Errorf("modules: load nodes: %w", err)
+			}
+
+			modules := make(map[string]int)
+			for _, n := range nodes {
+				if n.Module != "" {
+					modules[n.Module]++
+				}
+			}
+
+			if len(modules) == 0 {
+				fmt.Println("No modules detected. Run pcke scan first.")
+				return nil
+			}
+
+			// Collect and sort module names.
+			names := make([]string, 0, len(modules))
+			for name := range modules {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+
+			for _, name := range names {
+				fmt.Printf("  %-40s %d file(s)\n", name, modules[name])
+			}
+			fmt.Printf("\n%d module(s)\n", len(modules))
 			return nil
 		},
 	}
@@ -208,8 +388,22 @@ func newConfigCmd() *cobra.Command {
 			Use:   "get [key]",
 			Short: "Get a configuration value",
 			Args:  cobra.ExactArgs(1),
-			RunE: func(_ *cobra.Command, _ []string) error {
-				fmt.Println("pcke config get: not yet implemented (Phase 2)")
+			RunE: func(_ *cobra.Command, args []string) error {
+				cwd, err := os.Getwd()
+				if err != nil {
+					return fmt.Errorf("config get: get working directory: %w", err)
+				}
+
+				cfg, err := config.Load(cwd)
+				if err != nil {
+					return fmt.Errorf("config get: %w", err)
+				}
+
+				val, ok := configGet(cfg, args[0])
+				if !ok {
+					return fmt.Errorf("config get: unknown key %q", args[0])
+				}
+				fmt.Println(val)
 				return nil
 			},
 		},
@@ -217,8 +411,37 @@ func newConfigCmd() *cobra.Command {
 			Use:   "set [key] [value]",
 			Short: "Set a configuration value",
 			Args:  cobra.ExactArgs(2),
-			RunE: func(_ *cobra.Command, _ []string) error {
-				fmt.Println("pcke config set: not yet implemented (Phase 2)")
+			RunE: func(_ *cobra.Command, args []string) error {
+				cwd, err := os.Getwd()
+				if err != nil {
+					return fmt.Errorf("config set: get working directory: %w", err)
+				}
+
+				cfg, err := config.Load(cwd)
+				if err != nil {
+					return fmt.Errorf("config set: %w", err)
+				}
+
+				if err := configSet(&cfg, args[0], args[1]); err != nil {
+					return fmt.Errorf("config set: %w", err)
+				}
+
+				path := cwd + "/.pcke/config.toml"
+				if err := os.MkdirAll(cwd+"/.pcke", 0o700); err != nil {
+					return fmt.Errorf("config set: create .pcke dir: %w", err)
+				}
+
+				f, err := os.Create(path) //nolint:gosec // G304: path is constructed from cwd.
+				if err != nil {
+					return fmt.Errorf("config set: create config file: %w", err)
+				}
+				defer func() { _ = f.Close() }()
+
+				if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+					return fmt.Errorf("config set: write config: %w", err)
+				}
+
+				fmt.Printf("%s = %s\n", args[0], args[1])
 				return nil
 			},
 		},
@@ -226,8 +449,17 @@ func newConfigCmd() *cobra.Command {
 			Use:   "list",
 			Short: "List all configuration values",
 			RunE: func(_ *cobra.Command, _ []string) error {
-				fmt.Println("pcke config list: not yet implemented (Phase 2)")
-				return nil
+				cwd, err := os.Getwd()
+				if err != nil {
+					return fmt.Errorf("config list: get working directory: %w", err)
+				}
+
+				cfg, err := config.Load(cwd)
+				if err != nil {
+					return fmt.Errorf("config list: %w", err)
+				}
+
+				return toml.NewEncoder(os.Stdout).Encode(cfg)
 			},
 		},
 	)
@@ -551,4 +783,143 @@ func registerMigrations(e *migrate.Engine) {
 	//     Migrate:     migrateV1AddFooIndex,
 	// })
 	_ = e
+}
+
+// configGet returns the value of a dotted config key (e.g. "scan.redact_secrets").
+func configGet(cfg config.Config, key string) (string, bool) {
+	getters := configGetters()
+	fn, ok := getters[key]
+	if !ok {
+		return "", false
+	}
+	return fn(cfg), true
+}
+
+func configGetters() map[string]func(config.Config) string {
+	return map[string]func(config.Config) string{
+		"scan.redact_secrets":         func(c config.Config) string { return strconv.FormatBool(c.Scan.RedactSecrets) },
+		"scan.include_ignored":        func(c config.Config) string { return strconv.FormatBool(c.Scan.IncludeIgnored) },
+		"scan.max_file_bytes":         func(c config.Config) string { return strconv.FormatInt(c.Scan.MaxFileBytes, 10) },
+		"scan.exclude_globs":          func(c config.Config) string { return strings.Join(c.Scan.ExcludeGlobs, ", ") },
+		"kdb.buffer_pool_mb":          func(c config.Config) string { return strconv.Itoa(c.KDB.BufferPoolMB) },
+		"kdb.wal_segment_mb":          func(c config.Config) string { return strconv.Itoa(c.KDB.WALSegmentMB) },
+		"kdb.checkpoint_wal_mb":       func(c config.Config) string { return strconv.Itoa(c.KDB.CheckpointWALMB) },
+		"kdb.checkpoint_interval_sec": func(c config.Config) string { return strconv.Itoa(c.KDB.CheckpointIntervalS) },
+		"kdb.graceful_shutdown_sec":   func(c config.Config) string { return strconv.Itoa(c.KDB.GracefulShutdownS) },
+		"fts.tokenizer_cjk_mode":      func(c config.Config) string { return c.FTS.TokenizerCJKMode },
+		"fts.merge_tier_threshold":    func(c config.Config) string { return strconv.Itoa(c.FTS.MergeTierThreshold) },
+		"mcp.read_timeout_sec":        func(c config.Config) string { return strconv.Itoa(c.MCP.ReadTimeoutS) },
+		"mcp.proactive_context":       func(c config.Config) string { return strconv.FormatBool(c.MCP.ProactiveContext) },
+		"mcp.stream_threshold":        func(c config.Config) string { return strconv.Itoa(c.MCP.StreamThreshold) },
+		"mcp.chunk_size":              func(c config.Config) string { return strconv.Itoa(c.MCP.ChunkSize) },
+	}
+}
+
+// configSet updates a dotted config key in the given Config struct.
+func configSet(cfg *config.Config, key, value string) error {
+	setters := configSetters()
+	fn, ok := setters[key]
+	if !ok {
+		return fmt.Errorf("unknown key %q", key)
+	}
+	return fn(cfg, value)
+}
+
+func configSetters() map[string]func(*config.Config, string) error {
+	parseInt := func(v string) (int, error) { return strconv.Atoi(v) }
+	return map[string]func(*config.Config, string) error{
+		"scan.redact_secrets":  func(c *config.Config, v string) error { c.Scan.RedactSecrets = parseBool(v); return nil },
+		"scan.include_ignored": func(c *config.Config, v string) error { c.Scan.IncludeIgnored = parseBool(v); return nil },
+		"scan.max_file_bytes": func(c *config.Config, v string) error {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				return err
+			}
+			c.Scan.MaxFileBytes = n
+			return nil
+		},
+		"kdb.buffer_pool_mb": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.KDB.BufferPoolMB = n
+			return nil
+		},
+		"kdb.wal_segment_mb": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.KDB.WALSegmentMB = n
+			return nil
+		},
+		"kdb.checkpoint_wal_mb": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.KDB.CheckpointWALMB = n
+			return nil
+		},
+		"kdb.checkpoint_interval_sec": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.KDB.CheckpointIntervalS = n
+			return nil
+		},
+		"kdb.graceful_shutdown_sec": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.KDB.GracefulShutdownS = n
+			return nil
+		},
+		"fts.tokenizer_cjk_mode": func(c *config.Config, v string) error { c.FTS.TokenizerCJKMode = v; return nil },
+		"fts.merge_tier_threshold": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.FTS.MergeTierThreshold = n
+			return nil
+		},
+		"mcp.read_timeout_sec": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.MCP.ReadTimeoutS = n
+			return nil
+		},
+		"mcp.proactive_context": func(c *config.Config, v string) error { c.MCP.ProactiveContext = parseBool(v); return nil },
+		"mcp.stream_threshold": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.MCP.StreamThreshold = n
+			return nil
+		},
+		"mcp.chunk_size": func(c *config.Config, v string) error {
+			n, err := parseInt(v)
+			if err != nil {
+				return err
+			}
+			c.MCP.ChunkSize = n
+			return nil
+		},
+	}
+}
+
+func parseBool(v string) bool {
+	switch strings.ToLower(v) {
+	case "true", "1", "yes":
+		return true
+	default:
+		return false
+	}
 }

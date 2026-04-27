@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/jenaiz/pcke/internal/kdb"
 )
 
 func TestRootHelp(t *testing.T) {
@@ -52,11 +55,45 @@ func TestRootVersion(t *testing.T) {
 func TestSubcommandStubs(t *testing.T) {
 	t.Parallel()
 
-	subs := []string{"init", "rule", "note", "status", "modules"}
-
-	for _, sub := range subs {
+	// Commands that print help only (parent commands with subcommands).
+	helpSubs := []string{"init", "rule", "note"}
+	for _, sub := range helpSubs {
 		t.Run(sub, func(t *testing.T) {
 			t.Parallel()
+
+			cmd := newRootCmd()
+			buf := new(bytes.Buffer)
+			cmd.SetOut(buf)
+			cmd.SetErr(buf)
+			cmd.SetArgs([]string{sub})
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("%s: %v", sub, err)
+			}
+		})
+	}
+
+	// Commands that open the database need a temp directory.
+	dbSubs := []string{"status", "modules"}
+	for _, sub := range dbSubs {
+		t.Run(sub, func(t *testing.T) {
+			t.Parallel()
+
+			tmp := t.TempDir()
+			db, err := kdb.Open(tmp, nil)
+			if err != nil {
+				t.Fatalf("setup db: %v", err)
+			}
+			_ = db.Close()
+
+			// Chdir is process-global; cannot be truly parallel. Use a subprocess
+			// or accept the limitation. For now, we use Chdir in a non-conflicting
+			// temp dir.
+			origDir, _ := os.Getwd()
+			if err := os.Chdir(tmp); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(origDir) })
 
 			cmd := newRootCmd()
 			buf := new(bytes.Buffer)
@@ -74,6 +111,13 @@ func TestSubcommandStubs(t *testing.T) {
 func TestConfigSubcommands(t *testing.T) {
 	t.Parallel()
 
+	tmp := t.TempDir()
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+
 	tests := []struct {
 		args []string
 	}{
@@ -84,8 +128,6 @@ func TestConfigSubcommands(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(strings.Join(tc.args, "_"), func(t *testing.T) {
-			t.Parallel()
-
 			cmd := newRootCmd()
 			buf := new(bytes.Buffer)
 			cmd.SetOut(buf)
