@@ -1,5 +1,7 @@
 package query
 
+import "sort"
+
 // FieldType describes the data type of a collection field. The type checker
 // uses this to validate operator compatibility in WHERE conditions.
 type FieldType int
@@ -15,6 +17,34 @@ const (
 
 // Schema maps field names to their types for a given collection.
 type Schema map[string]FieldType
+
+// FieldNames returns the sorted field names in the schema.
+func (s Schema) FieldNames() []string {
+	names := make([]string, 0, len(s))
+	for name := range s {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// String returns the human-readable name of a field type.
+func (ft FieldType) String() string {
+	switch ft {
+	case FieldString:
+		return "string"
+	case FieldNumber:
+		return "number"
+	case FieldBool:
+		return "bool"
+	case FieldTime:
+		return "time"
+	case FieldStringSlice:
+		return "[]string"
+	default:
+		return "unknown"
+	}
+}
 
 // collections defines the known schema for each queryable collection.
 // These correspond to the JSON-serialized structs stored in kdb.
@@ -68,4 +98,14 @@ var collections = map[string]Schema{
 // CollectionSchema returns the schema for a collection, or nil if unknown.
 func CollectionSchema(name string) Schema {
 	return collections[name]
+}
+
+// Collections returns the names of all known collections.
+func Collections() []string {
+	names := make([]string, 0, len(collections))
+	for name := range collections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

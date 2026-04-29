@@ -126,11 +126,12 @@ func BuildPlan(q *Query) *Plan {
 		}
 	}
 
-	// Build filter list: all conditions except the indexed one.
-	for i, cond := range q.Where.Conditions {
-		if i == bestIdx {
-			continue
-		}
+	// Build filter list: include ALL conditions as post-scan filters.
+	// The indexed condition is kept because the executor does not yet
+	// implement native IndexSeek; it always falls back to FullScan with
+	// filter evaluation. Removing the indexed condition here would cause
+	// unfiltered results. TODO: remove once executor supports IndexSeek.
+	for _, cond := range q.Where.Conditions {
 		plan.Filters = append(plan.Filters, cond)
 	}
 

@@ -729,6 +729,51 @@ func printText(rs *query.ResultSet) error {
 	return nil
 }
 
+func newSchemaCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "schema",
+		Short: "Inspect the knowledge base schema",
+		Long: `Show available collections and their fields.
+
+Examples:
+  pcke schema collections              List all queryable collections
+  pcke schema describe nodes           Show fields for the nodes collection`,
+	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:     "collections",
+		Short:   "List all queryable collections",
+		Aliases: []string{"list"},
+		Args:    cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			for _, name := range query.Collections() {
+				schema := query.CollectionSchema(name)
+				fmt.Printf("  %-14s (%d fields)\n", name, len(schema))
+			}
+			return nil
+		},
+	})
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "describe [collection]",
+		Short: "Show fields and types for a collection",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			schema := query.CollectionSchema(args[0])
+			if schema == nil {
+				return fmt.Errorf("unknown collection %q; run 'pcke schema collections' to see available ones", args[0])
+			}
+			fmt.Printf("Collection: %s\n\n", args[0])
+			for _, field := range schema.FieldNames() {
+				fmt.Printf("  %-16s %s\n", field, schema[field])
+			}
+			return nil
+		},
+	})
+
+	return cmd
+}
+
 func newMigrateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "migrate",

@@ -160,8 +160,8 @@ func TestBuildPlan(t *testing.T) {
 }
 
 func TestBuildPlan_FiltersCount(t *testing.T) {
-	// AND with indexed + non-indexed: the indexed condition is consumed,
-	// the non-indexed remains as a filter.
+	// AND with indexed + non-indexed: the indexed condition is kept in
+	// filters (executor does not yet implement native IndexSeek).
 	q := Query{
 		Collection: "nodes",
 		Where: &WhereClause{
@@ -175,8 +175,8 @@ func TestBuildPlan_FiltersCount(t *testing.T) {
 	}
 
 	plan := BuildPlan(&q)
-	if len(plan.Filters) != 2 {
-		t.Errorf("Filters count: got %d, want 2", len(plan.Filters))
+	if len(plan.Filters) != 3 {
+		t.Errorf("Filters count: got %d, want 3", len(plan.Filters))
 	}
 }
 
