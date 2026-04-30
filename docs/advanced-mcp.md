@@ -3,6 +3,20 @@
 pcke v1.1 extends the MCP (Model Context Protocol) server with streaming,
 subscriptions, prompt templates, and proactive context suggestions.
 
+## Starting the Server
+
+```bash
+pcke serve
+```
+
+This starts the MCP server on stdio transport. It blocks until stdin closes
+or a termination signal is received. The server requires an initialised
+knowledge base (`pcke init` + `pcke scan`).
+
+See [Getting Started](getting-started.md) for editor configuration examples.
+
+---
+
 ## Streaming Responses
 
 Large query results are delivered as chunked JSON, allowing agents to begin

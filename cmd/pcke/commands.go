@@ -32,6 +32,14 @@ func newInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Initialise pcke in the current repository",
+		Long: `Initialise the pcke knowledge base in the current repository.
+
+Creates a .pcke/ directory containing the database file. Safe to run
+multiple times (idempotent).
+
+Examples:
+  pcke init
+  cd /path/to/project && pcke init`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -74,6 +82,14 @@ func newScanCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "scan",
 		Short: "Scan the repository and update the knowledge base",
+		Long: `Scan the repository for source files and update the knowledge base.
+
+Incrementally detects new, modified, and deleted files. Use --full to
+force a complete rebuild of all knowledge nodes.
+
+Examples:
+  pcke scan              Incremental scan (fast)
+  pcke scan --full       Full rebuild of knowledge base`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -113,6 +129,14 @@ func newSyncCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "sync",
 		Short: "Generate output files (.context/, copilot-instructions, etc.)",
+		Long: `Generate context output files from the knowledge base.
+
+Renders architecture, conventions, constraints, and module context into
+files that AI coding agents can consume directly.
+
+Examples:
+  pcke sync                    Generate all output files
+  pcke scan && pcke sync       Scan then sync in one go`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -496,6 +520,13 @@ func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show knowledge base status",
+		Long: `Show summary information about the knowledge base.
+
+Displays schema version, total keys, knowledge node count, file size,
+and tree depth.
+
+Examples:
+  pcke status`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -534,6 +565,14 @@ func newModulesCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "modules",
 		Short: "List detected modules",
+		Long: `List all modules detected in the knowledge base.
+
+Modules are directory-level groupings inferred during scan. Each module
+shows the number of source files it contains.
+
+Examples:
+  pcke modules
+  pcke modules | grep internal`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -586,6 +625,12 @@ func newDiagnosticsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "diagnostics",
 		Short: "Show database diagnostics",
+		Long: `Show detailed database diagnostics including page stats, WAL state,
+buffer pool metrics, and free space information.
+
+Examples:
+  pcke diagnostics                 Human-readable output
+  pcke diagnostics --format=json   Machine-readable JSON`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -628,6 +673,15 @@ func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "View and manage configuration",
+		Long: `View and manage pcke configuration.
+
+Configuration is stored in .pcke/config.toml. Use get/set/list subcommands
+to inspect and modify settings.
+
+Examples:
+  pcke config list
+  pcke config get scan.max_file_bytes
+  pcke config set kdb.buffer_pool_mb 64`,
 	}
 
 	cmd.AddCommand(

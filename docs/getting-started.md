@@ -67,3 +67,34 @@ pcke migrate
 ```
 
 See [Schema Migrations](schema-migrations.md).
+
+## Start the MCP server
+
+```bash
+pcke serve
+```
+
+Starts the MCP (Model Context Protocol) server on stdio transport. AI agents
+(Copilot, Cursor, Claude) connect via this command to access the knowledge base.
+
+Configure your editor to use it — for example in `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "pcke": {
+      "type": "stdio",
+      "command": "pcke",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+The server exposes tools (`recall`, `get_module_context`, `get_constraints`,
+`get_history`), resources (`pcke://architecture`, `pcke://constraints`,
+`pcke://decisions`), and prompt templates (`onboarding`, `review`, `debug`,
+`refactor`).
+
+See [Advanced MCP Features](advanced-mcp.md) for streaming, subscriptions,
+and proactive context.

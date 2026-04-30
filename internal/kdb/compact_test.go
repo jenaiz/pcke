@@ -138,3 +138,108 @@ func compactVerifyKeys(ctx context.Context, t *testing.T, db *kdb.DB) {
 		t.Fatalf("post-compact verify: %v", err)
 	}
 }
+
+// TestCompactMultiBatch triggers the multi-batch write path (>500 keys).
+func TestCompactMultiBatch(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Pre-grow to have pages available.
+	for range 100 {
+		if err := db.Grow(); err != nil {
+			t.Fatalf("Grow: %v", err)
+		}
+	}
+
+	compactMultiBatchInsert(ctx, t, db)
+
+	if err := db.Checkpoint(ctx); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+
+	result, err := db.Compact(ctx)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if result.KeysCopied < 650 {
+		t.Errorf("expected >= 650 keys copied, got %d", result.KeysCopied)
+	}
+
+	compactMultiBatchVerify(ctx, t, db)
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func compactMultiBatchInsert(ctx context.Context, t *testing.T, db *kdb.DB) {
+	t.Helper()
+	for batch := 0; batch < 13; batch++ {
+		err := db.Update(ctx, func(wtx *tx.WriteTx) error {
+			for i := batch * 50; i < (batch+1)*50; i++ {
+				key := fmt.Sprintf("batch-%05d", i)
+				val := fmt.Sprintf("val-%05d-some-padding", i)
+				if err := wtx.Put([]byte(key), []byte(val)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("insert batch %d: %v", batch, err)
+		}
+	}
+}
+
+func compactMultiBatchVerify(ctx context.Context, t *testing.T, db *kdb.DB) {
+	t.Helper()
+	err := db.View(ctx, func(rtx *tx.ReadTx) error {
+		val, err := rtx.Get([]byte("batch-00000"))
+		if err != nil {
+			return err
+		}
+		if len(val) == 0 {
+			return fmt.Errorf("empty value for batch-00000")
+		}
+		val, err = rtx.Get([]byte("batch-00649"))
+		if err != nil {
+			return err
+		}
+		if len(val) == 0 {
+			return fmt.Errorf("empty value for batch-00649")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("post-compact verify: %v", err)
+	}
+}
+
+// TestCompactEmptyDB tests compaction on a database with no user data.
+func TestCompactEmptyDB(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	ctx := context.Background()
+	result, err := db.Compact(ctx)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if result.KeysCopied != 0 {
+		t.Errorf("expected 0 keys on empty DB, got %d", result.KeysCopied)
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}

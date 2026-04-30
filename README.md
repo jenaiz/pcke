@@ -32,6 +32,12 @@ make verify   # lint + test + build
 # Full-text search
 ./bin/pcke recall "error handling strategy"
 
+# Watch for changes and auto-scan
+./bin/pcke watch
+
+# Interactive query shell
+./bin/pcke shell
+
 # Offline compaction (reclaim space after deletions)
 ./bin/pcke compact
 
@@ -203,7 +209,32 @@ pcke recall "error handling strategy"
 
 ### CLI (`cmd/pcke`)
 
-Cobra-based with subcommands: `init`, `scan`, `scan --deep`, `sync`, `rule`, `note`, `status`, `modules`, `diagnostics`, `config`, `recall`, `compact`, `serve`, `query`, `explain`, `export`, `migrate`.
+Cobra-based CLI with 22+ commands:
+
+| Command | Description |
+|---------|-------------|
+| `pcke init` | Initialize pcke in the current repository |
+| `pcke scan` | Scan the repository and update the knowledge base |
+| `pcke scan --deep` | Deep scan with AST extraction (requires CGo) |
+| `pcke sync` | Generate output files (.context/, copilot-instructions, etc.) |
+| `pcke recall` | Full-text search with BM25 scoring |
+| `pcke query` | Query the knowledge base using the pcke DSL |
+| `pcke explain` | Show execution plan for a query |
+| `pcke export` | Export query results as JSON or YAML |
+| `pcke shell` | Interactive query REPL |
+| `pcke watch` | Watch for file changes and auto-scan |
+| `pcke serve` | Start MCP server on stdio |
+| `pcke note add/list/remove` | Manage project notes |
+| `pcke rule add/list/remove` | Manage project rules |
+| `pcke relations list/graph` | Explore module dependencies |
+| `pcke schema` | Inspect the knowledge base schema |
+| `pcke modules` | List detected modules |
+| `pcke status` | Show knowledge base status |
+| `pcke diagnostics` | Show database diagnostics |
+| `pcke compact` | Compact the database to reclaim space |
+| `pcke migrate` | Run schema migrations |
+| `pcke config get/set/list` | View and manage configuration |
+| `pcke clean` | Remove the knowledge base |
 
 ### Configuration (`internal/config`)
 

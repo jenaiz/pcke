@@ -29,6 +29,7 @@ type KnowledgeNode struct {
 	Language    string    `json:"language"`
 	Module      string    `json:"module"`
 	Class       string    `json:"class"`
+	Source      string    `json:"source,omitempty"`
 	Stability   float64   `json:"stability"`
 	Status      string    `json:"status"`
 	ContentHash string    `json:"content_hash"`
