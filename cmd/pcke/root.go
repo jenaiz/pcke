@@ -50,6 +50,11 @@ func newRootCmd() *cobra.Command {
 		newExportCmd(),
 		newMigrateCmd(),
 		newSchemaCmd(),
+		newServeCmd(),
+		newRelationsCmd(),
+		newCleanCmd(),
+		newWatchCmd(),
+		newShellCmd(),
 	)
 
 	return root

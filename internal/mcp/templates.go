@@ -3,8 +3,11 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/output"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -47,28 +50,43 @@ var builtinTemplates = []templateDef{
 	},
 }
 
-// registerPrompts adds all built-in prompt templates to the MCP server.
+// registerPrompts adds all built-in and custom prompt templates to the MCP server.
 func (s *Server) registerPrompts() {
+	// Register built-in templates.
+	builtinNames := make(map[string]bool)
 	for _, td := range builtinTemplates {
-		def := td // capture for closure
-		prompt := mcplib.NewPrompt(def.name,
-			mcplib.WithPromptDescription(def.description),
-		)
-		if def.hasModule {
-			prompt = mcplib.NewPrompt(def.name,
-				mcplib.WithPromptDescription(def.description),
-				mcplib.WithArgument("module",
-					mcplib.ArgumentDescription("Module name to scope the context (e.g. 'internal/kdb')"),
-				),
-			)
-		}
-		handler := s.makePromptHandler(def)
-		s.prompts = append(s.prompts, mcpserver.ServerPrompt{
-			Prompt:  prompt,
-			Handler: handler,
-		})
-		s.srv.AddPrompt(prompt, handler)
+		builtinNames[td.name] = true
+		s.registerOnePrompt(td)
 	}
+
+	// Load and register custom templates.
+	custom := loadCustomTemplates(s.root)
+	for _, td := range custom {
+		if builtinNames[td.name] {
+			fmt.Fprintf(os.Stderr, "mcp: custom template %q overrides built-in\n", td.name)
+		}
+		s.registerOnePrompt(td)
+	}
+}
+
+func (s *Server) registerOnePrompt(def templateDef) {
+	prompt := mcplib.NewPrompt(def.name,
+		mcplib.WithPromptDescription(def.description),
+	)
+	if def.hasModule {
+		prompt = mcplib.NewPrompt(def.name,
+			mcplib.WithPromptDescription(def.description),
+			mcplib.WithArgument("module",
+				mcplib.ArgumentDescription("Module name to scope the context"),
+			),
+		)
+	}
+	handler := s.makePromptHandler(def)
+	s.prompts = append(s.prompts, mcpserver.ServerPrompt{
+		Prompt:  prompt,
+		Handler: handler,
+	})
+	s.srv.AddPrompt(prompt, handler)
 }
 
 // makePromptHandler creates a PromptHandlerFunc for the given template definition.
@@ -142,4 +160,75 @@ func filterNodesByModule(nodes []analysis.KnowledgeNode, module string) []analys
 		}
 	}
 	return filtered
+}
+
+// customTemplateDef represents a user-defined template loaded from TOML.
+type customTemplateDef struct {
+	Name        string   `toml:"name"`
+	Description string   `toml:"description"`
+	HasModule   bool     `toml:"has_module"`
+	Sections    []string `toml:"sections"`
+}
+
+// loadCustomTemplates reads .pcke/templates/*.toml and returns template defs.
+func loadCustomTemplates(root string) []templateDef {
+	if root == "" {
+		return nil
+	}
+	dir := filepath.Join(root, ".pcke", "templates")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil // No custom templates directory.
+	}
+
+	var templates []templateDef
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed from known root.
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mcp: skip template %s: %v\n", entry.Name(), err)
+			continue
+		}
+		var ct customTemplateDef
+		if err := toml.Unmarshal(data, &ct); err != nil {
+			fmt.Fprintf(os.Stderr, "mcp: skip template %s: parse error: %v\n", entry.Name(), err)
+			continue
+		}
+		if ct.Name == "" {
+			continue
+		}
+		validSections := filterValidSections(ct.Sections)
+		if len(validSections) == 0 {
+			fmt.Fprintf(os.Stderr, "mcp: skip template %s: no valid sections\n", entry.Name())
+			continue
+		}
+		templates = append(templates, templateDef{
+			name:        ct.Name,
+			description: ct.Description,
+			hasModule:   ct.HasModule,
+			sections:    validSections,
+		})
+	}
+	return templates
+}
+
+// filterValidSections returns only sections that have a renderer.
+func filterValidSections(sections []string) []string {
+	valid := map[string]bool{
+		"architecture": true,
+		"conventions":  true,
+		"constraints":  true,
+		"decisions":    true,
+		"history":      true,
+	}
+	var out []string
+	for _, s := range sections {
+		if valid[s] {
+			out = append(out, s)
+		}
+	}
+	return out
 }

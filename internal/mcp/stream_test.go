@@ -489,7 +489,7 @@ func TestSuggestContext_Disabled(t *testing.T) {
 	db := seedDB(t)
 	defer func() { _ = db.Close() }()
 
-	srv := pckmcp.New(db)
+	srv := pckmcp.New(db, t.TempDir())
 	ctx := context.Background()
 
 	pc, err := srv.SuggestContext(ctx, "tell me about internal/kdb", false)
@@ -505,7 +505,7 @@ func TestSuggestContext_Enabled_ModuleFound(t *testing.T) {
 	db := seedDB(t)
 	defer func() { _ = db.Close() }()
 
-	srv := pckmcp.New(db)
+	srv := pckmcp.New(db, t.TempDir())
 	ctx := context.Background()
 
 	pc, err := srv.SuggestContext(ctx, "tell me about internal/kdb", true)
@@ -527,7 +527,7 @@ func TestSuggestContext_Enabled_NoModule(t *testing.T) {
 	db := seedDB(t)
 	defer func() { _ = db.Close() }()
 
-	srv := pckmcp.New(db)
+	srv := pckmcp.New(db, t.TempDir())
 	ctx := context.Background()
 
 	pc, err := srv.SuggestContext(ctx, "how do I write good tests?", true)
@@ -545,7 +545,7 @@ func TestServer_NotifyEvent(t *testing.T) {
 	db := seedDB(t)
 	defer func() { _ = db.Close() }()
 
-	srv := pckmcp.New(db)
+	srv := pckmcp.New(db, t.TempDir())
 
 	var received pckmcp.Event
 	unsub, _ := srv.Broker().Subscribe(pckmcp.EventScanCompleted, func(e pckmcp.Event) {

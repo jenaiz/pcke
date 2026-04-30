@@ -20,6 +20,7 @@ import (
 // Server wraps the MCP protocol server with access to the kdb database.
 type Server struct {
 	db        *kdb.DB
+	root      string
 	srv       *mcpserver.MCPServer
 	resources []mcpserver.ServerResource
 	prompts   []mcpserver.ServerPrompt
@@ -28,8 +29,8 @@ type Server struct {
 
 // New creates a [Server] backed by the given kdb database.
 // All tools and resources are read-only.
-func New(db *kdb.DB) *Server {
-	s := &Server{db: db, broker: NewBroker()}
+func New(db *kdb.DB, root string) *Server {
+	s := &Server{db: db, root: root, broker: NewBroker()}
 
 	s.srv = mcpserver.NewMCPServer(
 		"pcke",

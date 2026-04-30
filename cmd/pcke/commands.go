@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
@@ -19,6 +23,7 @@ import (
 	"github.com/jenaiz/pcke/internal/kdb/migrate"
 	kdbquery "github.com/jenaiz/pcke/internal/kdb/query"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
+	"github.com/jenaiz/pcke/internal/mcp"
 	"github.com/jenaiz/pcke/internal/output"
 	"github.com/jenaiz/pcke/internal/query"
 )
@@ -137,50 +142,180 @@ func newRuleCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rule",
 		Short: "Manage project rules",
-		Long: `Manage project rules extracted from @pcke-rule annotations in source code.
+		Long: `Manage project rules extracted from @pcke-rule annotations in source code
+and manually added rules.
 
 Rules are discovered during scan from in-code annotations like:
-  // @pcke-rule no-raw-sql: Never execute raw SQL; always use parameterized queries`,
+  // @pcke-rule no-raw-sql: Never execute raw SQL; always use parameterized queries
+
+Manual rules can be added with: pcke rule add "No hardcoded secrets"`,
 	}
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "list",
-		Short: "List rules extracted from source annotations",
+		Short: "List rules extracted from source annotations and manual rules",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("rule list: get working directory: %w", err)
-			}
+			return runRuleList()
+		},
+	})
 
-			db, err := kdb.Open(cwd, nil)
-			if err != nil {
-				return fmt.Errorf("rule list: open database: %w", err)
-			}
-			defer func() { _ = db.Close() }()
-			warnBranchMismatch(db, cwd)
+	// rule add
+	var scopeFlag, severityFlag string
+	addCmd := &cobra.Command{
+		Use:   "add [content]",
+		Short: "Add a manual rule to the knowledge base",
+		Long: `Add a rule manually. Rules added this way coexist with those
+discovered from @pcke-rule annotations. They are distinguished by source=manual.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runRuleAdd(args[0], scopeFlag, severityFlag)
+		},
+	}
+	addCmd.Flags().StringVar(&scopeFlag, "scope", "global", "Rule scope (global, module)")
+	addCmd.Flags().StringVar(&severityFlag, "severity", "must", "Rule severity (must, should, may)")
+	cmd.AddCommand(addCmd)
 
-			nodes, err := output.LoadNodes(context.Background(), db)
-			if err != nil {
-				return fmt.Errorf("rule list: load nodes: %w", err)
-			}
-
-			var count int
-			for _, n := range nodes {
-				if n.Type == "rule" {
-					count++
-					fmt.Printf("  %s  (%s)\n", n.Name, n.FilePath)
-				}
-			}
-			if count == 0 {
-				fmt.Println("No rules found. Add @pcke-rule annotations to your source files and run pcke scan.")
-			} else {
-				fmt.Printf("\n%d rule(s)\n", count)
-			}
-			return nil
+	// rule remove
+	cmd.AddCommand(&cobra.Command{
+		Use:   "remove [id]",
+		Short: "Remove a manual rule from the knowledge base",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runRuleRemove(args[0])
 		},
 	})
 
 	return cmd
+}
+
+func runRuleList() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("rule list: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("rule list: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	warnBranchMismatch(db, cwd)
+
+	nodes, err := output.LoadNodes(context.Background(), db)
+	if err != nil {
+		return fmt.Errorf("rule list: load nodes: %w", err)
+	}
+
+	var count int
+	for _, n := range nodes {
+		if n.Type == "rule" {
+			count++
+			source := "annotation"
+			if n.Source == "manual" {
+				source = "manual"
+			}
+			fmt.Printf("  [%s] %s  (%s)\n", source, n.Name, n.FilePath)
+		}
+	}
+	if count == 0 {
+		fmt.Println("No rules found. Add @pcke-rule annotations to your source files and run pcke scan.")
+	} else {
+		fmt.Printf("\n%d rule(s)\n", count)
+	}
+	return nil
+}
+
+func runRuleAdd(content, scope, severity string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("rule add: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("rule add: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	id := generateUUID()
+	now := time.Now().UTC()
+
+	node := map[string]any{
+		"id":         id,
+		"name":       content,
+		"type":       "rule",
+		"class":      "constraint",
+		"source":     "manual",
+		"scope":      scope,
+		"severity":   severity,
+		"status":     "active",
+		"module":     "",
+		"file_path":  "",
+		"language":   "",
+		"created_at": now.Format(time.RFC3339),
+		"updated_at": now.Format(time.RFC3339),
+	}
+
+	data, err := json.Marshal(node)
+	if err != nil {
+		return fmt.Errorf("rule add: marshal: %w", err)
+	}
+
+	if err := db.Update(context.Background(), func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("kn:"+id), data)
+	}); err != nil {
+		return fmt.Errorf("rule add: %w", err)
+	}
+
+	fmt.Printf("Added rule %s\n", id)
+	return nil
+}
+
+func runRuleRemove(id string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("rule remove: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("rule remove: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	key := []byte("kn:" + id)
+
+	// Verify it exists and is a manual rule.
+	var exists bool
+	if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+		val, err := rtx.Get(key)
+		if err != nil {
+			return nil
+		}
+		var m map[string]any
+		if err := json.Unmarshal(val, &m); err != nil {
+			return nil
+		}
+		if m["type"] == "rule" && m["source"] == "manual" {
+			exists = true
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("rule remove: %w", err)
+	}
+
+	if !exists {
+		return fmt.Errorf("rule remove: manual rule %q not found", id)
+	}
+
+	if err := db.Update(context.Background(), func(wtx *tx.WriteTx) error {
+		return wtx.Delete(key)
+	}); err != nil {
+		return fmt.Errorf("rule remove: %w", err)
+	}
+
+	fmt.Printf("Removed rule %s\n", id)
+	return nil
 }
 
 func newNoteCmd() *cobra.Command {
@@ -196,53 +331,165 @@ Notes can be queried with: pcke query "notes where tags contains 'decision'"`,
 		Use:   "list",
 		Short: "List notes in the knowledge base",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("note list: get working directory: %w", err)
-			}
+			return runNoteList()
+		},
+	})
 
-			db, err := kdb.Open(cwd, nil)
-			if err != nil {
-				return fmt.Errorf("note list: open database: %w", err)
-			}
-			defer func() { _ = db.Close() }()
-			warnBranchMismatch(db, cwd)
+	// note add
+	var tagsFlag string
+	addCmd := &cobra.Command{
+		Use:   "add [content]",
+		Short: "Add a note to the knowledge base",
+		Long:  `Add a note with optional tags. Content is required as positional argument.`,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runNoteAdd(args[0], tagsFlag)
+		},
+	}
+	addCmd.Flags().StringVar(&tagsFlag, "tags", "", "Comma-separated tags (e.g. decision,arch)")
+	cmd.AddCommand(addCmd)
 
-			var count int
-			if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
-				prefix := []byte("note:")
-				c := rtx.Cursor()
-				for ok := c.Seek(prefix); ok; ok = c.Next() {
-					if !strings.HasPrefix(string(c.Key()), "note:") {
-						break
-					}
-					var m map[string]any
-					if err := json.Unmarshal(c.Value(), &m); err != nil {
-						continue
-					}
-					count++
-					id, _ := m["id"].(string)
-					content, _ := m["content"].(string)
-					if len(content) > 80 {
-						content = content[:80] + "..."
-					}
-					fmt.Printf("  %s: %s\n", id, content)
-				}
-				return nil
-			}); err != nil {
-				return fmt.Errorf("note list: %w", err)
-			}
-
-			if count == 0 {
-				fmt.Println("No notes found.")
-			} else {
-				fmt.Printf("\n%d note(s)\n", count)
-			}
-			return nil
+	// note remove
+	cmd.AddCommand(&cobra.Command{
+		Use:   "remove [id]",
+		Short: "Remove a note from the knowledge base",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runNoteRemove(args[0])
 		},
 	})
 
 	return cmd
+}
+
+func runNoteList() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("note list: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("note list: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	warnBranchMismatch(db, cwd)
+
+	var count int
+	if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+		prefix := []byte("nt:")
+		c := rtx.Cursor()
+		for ok := c.Seek(prefix); ok; ok = c.Next() {
+			if !strings.HasPrefix(string(c.Key()), "nt:") {
+				break
+			}
+			var m map[string]any
+			if err := json.Unmarshal(c.Value(), &m); err != nil {
+				continue
+			}
+			count++
+			id, _ := m["id"].(string)
+			content, _ := m["content"].(string)
+			if len(content) > 80 {
+				content = content[:80] + "..."
+			}
+			fmt.Printf("  %s: %s\n", id, content)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("note list: %w", err)
+	}
+
+	if count == 0 {
+		fmt.Println("No notes found.")
+	} else {
+		fmt.Printf("\n%d note(s)\n", count)
+	}
+	return nil
+}
+
+func runNoteAdd(content, tagsFlag string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("note add: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("note add: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	id := generateUUID()
+	now := time.Now().UTC()
+
+	tags := []string{}
+	if tagsFlag != "" {
+		tags = strings.Split(tagsFlag, ",")
+		for i := range tags {
+			tags[i] = strings.TrimSpace(tags[i])
+		}
+	}
+
+	note := map[string]any{
+		"id":         id,
+		"content":    content,
+		"tags":       tags,
+		"created_at": now.Format(time.RFC3339),
+		"updated_at": now.Format(time.RFC3339),
+	}
+
+	data, err := json.Marshal(note)
+	if err != nil {
+		return fmt.Errorf("note add: marshal: %w", err)
+	}
+
+	if err := db.Update(context.Background(), func(wtx *tx.WriteTx) error {
+		return wtx.Put([]byte("nt:"+id), data)
+	}); err != nil {
+		return fmt.Errorf("note add: %w", err)
+	}
+
+	fmt.Printf("Added note %s\n", id)
+	return nil
+}
+
+func runNoteRemove(id string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("note remove: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("note remove: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	key := []byte("nt:" + id)
+
+	// Verify note exists before deleting.
+	var exists bool
+	if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+		_, err := rtx.Get(key)
+		exists = err == nil
+		return nil
+	}); err != nil {
+		return fmt.Errorf("note remove: %w", err)
+	}
+
+	if !exists {
+		return fmt.Errorf("note remove: note %q not found", id)
+	}
+
+	if err := db.Update(context.Background(), func(wtx *tx.WriteTx) error {
+		return wtx.Delete(key)
+	}); err != nil {
+		return fmt.Errorf("note remove: %w", err)
+	}
+
+	fmt.Printf("Removed note %s\n", id)
+	return nil
 }
 
 func newStatusCmd() *cobra.Command {
@@ -469,64 +716,138 @@ func newConfigCmd() *cobra.Command {
 
 func newRecallCmd() *cobra.Command {
 	var limit int
+	var format string
+	var verbose bool
 
 	cmd := &cobra.Command{
 		Use:   "recall [query]",
 		Short: "Search the knowledge base using full-text search",
 		Long: `Search the knowledge base for nodes matching a natural language query.
-Results are ranked using BM25 relevance scoring.`,
+Results are ranked using BM25 relevance scoring.
+
+Examples:
+  pcke recall "error handling"
+  pcke recall --format=json "database connection"
+  pcke recall --verbose "authentication"`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			queryStr := strings.Join(args, " ")
-
-			cwd, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("recall: get working directory: %w", err)
-			}
-
-			db, err := kdb.Open(cwd, nil)
-			if err != nil {
-				return fmt.Errorf("recall: open database: %w", err)
-			}
-			defer func() { _ = db.Close() }()
-			warnBranchMismatch(db, cwd)
-
-			// Build FTS index from the DB.
-			idx := fts.NewIndex()
-			if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
-				c := rtx.Cursor()
-				if !c.First() {
-					return nil
-				}
-				for c.Valid() {
-					idx.AddDocument(string(c.Value()))
-					c.Next()
-				}
-				return nil
-			}); err != nil {
-				return fmt.Errorf("recall: index documents: %w", err)
-			}
-			idx.Commit()
-
-			planner := kdbquery.NewPlanner(idx)
-			results := planner.Search(queryStr, limit)
-
-			if len(results) == 0 {
-				fmt.Println("No results found.")
-				return nil
-			}
-
-			for i, r := range results {
-				fmt.Printf("%d. [doc:%d] score=%.4f\n", i+1, r.DocID, r.Score)
-			}
-
-			return nil
+			return runRecall(queryStr, limit, format, verbose)
 		},
 	}
 
 	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of results to return")
+	cmd.Flags().StringVar(&format, "format", "text", "Output format: text or json")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show all node fields in results")
 
 	return cmd
+}
+
+func runRecall(queryStr string, limit int, format string, verbose bool) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("recall: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("recall: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	warnBranchMismatch(db, cwd)
+
+	// Build FTS index from knowledge nodes only.
+	idx := fts.NewIndex()
+	var docs []json.RawMessage // docID → raw JSON
+	if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+		prefix := []byte("kn:")
+		c := rtx.Cursor()
+		for ok := c.Seek(prefix); ok; ok = c.Next() {
+			if !strings.HasPrefix(string(c.Key()), "kn:") {
+				break
+			}
+			raw := make([]byte, len(c.Value()))
+			copy(raw, c.Value())
+			idx.AddDocument(string(raw))
+			docs = append(docs, json.RawMessage(raw))
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("recall: index documents: %w", err)
+	}
+	idx.Commit()
+
+	planner := kdbquery.NewPlanner(idx)
+	results := planner.Search(queryStr, limit)
+
+	if len(results) == 0 {
+		fmt.Println("No results found.")
+		return nil
+	}
+
+	if format == "json" {
+		return printRecallJSON(results, docs)
+	}
+	return printRecallText(results, docs, verbose)
+}
+
+func printRecallText(results []kdbquery.Result, docs []json.RawMessage, verbose bool) error {
+	for i, r := range results {
+		if int(r.DocID) >= len(docs) { //nolint:gosec // G115: DocID is bounded by index size
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(docs[r.DocID], &m); err != nil {
+			fmt.Printf("%d. [score=%.4f] (unparseable)\n", i+1, r.Score)
+			continue
+		}
+
+		name, _ := m["name"].(string)
+		filePath, _ := m["file_path"].(string)
+		module, _ := m["module"].(string)
+		nodeType, _ := m["type"].(string)
+
+		fmt.Printf("%d. %s  [%s]  score=%.4f\n", i+1, name, nodeType, r.Score)
+		if filePath != "" {
+			fmt.Printf("   file: %s\n", filePath)
+		}
+		if module != "" {
+			fmt.Printf("   module: %s\n", module)
+		}
+		if verbose {
+			for k, v := range m {
+				if k == "name" || k == "file_path" || k == "module" || k == "type" {
+					continue
+				}
+				fmt.Printf("   %s: %v\n", k, v)
+			}
+		}
+		if i < len(results)-1 {
+			fmt.Println()
+		}
+	}
+	fmt.Printf("\n%d result(s)\n", len(results))
+	return nil
+}
+
+func printRecallJSON(results []kdbquery.Result, docs []json.RawMessage) error {
+	type recallResult struct {
+		Score float64         `json:"score"`
+		Node  json.RawMessage `json:"node"`
+	}
+	out := make([]recallResult, 0, len(results))
+	for _, r := range results {
+		if int(r.DocID) >= len(docs) { //nolint:gosec // G115: DocID is bounded by index size
+			continue
+		}
+		out = append(out, recallResult{Score: r.Score, Node: docs[r.DocID]})
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("recall: marshal JSON: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
 }
 
 func newCompactCmd() *cobra.Command {
@@ -967,4 +1288,495 @@ func parseBool(v string) bool {
 	default:
 		return false
 	}
+}
+
+func newServeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "serve",
+		Short: "Start the MCP server on stdio",
+		Long: `Start the MCP (Model Context Protocol) server on stdio transport.
+
+The server exposes pcke's knowledge base to AI agents via the MCP protocol.
+It blocks until stdin closes or a termination signal is received.
+
+Tools:     recall, get_module_context, get_constraints, get_history
+Resources: pcke://architecture, pcke://constraints, pcke://decisions
+Prompts:   onboarding, review, debug, refactor
+
+Examples:
+  pcke serve                     Start MCP server on stdio
+  echo '{}' | pcke serve        Test connectivity`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("serve: get working directory: %w", err)
+			}
+
+			if _, err := os.Stat(cwd + "/.pcke"); os.IsNotExist(err) {
+				return fmt.Errorf("serve: no knowledge base found; run 'pcke init' first")
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("serve: open database: %w", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			srv := mcp.New(db, cwd)
+			return srv.Serve()
+		},
+	}
+}
+
+func newRelationsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "relations",
+		Short: "Explore module and node relationships",
+		Long: `Explore the dependency graph between modules and nodes in the knowledge base.
+
+Examples:
+  pcke relations list                         List all relations
+  pcke relations list --module=internal/kdb   Filter by module
+  pcke relations list --type=imports          Filter by relation type
+  pcke relations graph                        Show module dependency graph`,
+	}
+
+	// relations list
+	var moduleFilter, typeFilter string
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List relations in the knowledge base",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runRelationsList(moduleFilter, typeFilter)
+		},
+	}
+	listCmd.Flags().StringVar(&moduleFilter, "module", "", "Filter by module name")
+	listCmd.Flags().StringVar(&typeFilter, "type", "", "Filter by relation type")
+
+	// relations graph
+	graphCmd := &cobra.Command{
+		Use:   "graph",
+		Short: "Show module dependency graph as text art",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runRelationsGraph()
+		},
+	}
+
+	cmd.AddCommand(listCmd, graphCmd)
+	return cmd
+}
+
+func runRelationsList(moduleFilter, typeFilter string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("relations list: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("relations list: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var count int
+	if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+		prefix := []byte("rel:")
+		c := rtx.Cursor()
+		for ok := c.Seek(prefix); ok; ok = c.Next() {
+			if !strings.HasPrefix(string(c.Key()), "rel:") {
+				break
+			}
+			var m map[string]any
+			if err := json.Unmarshal(c.Value(), &m); err != nil {
+				continue
+			}
+
+			// Apply filters.
+			if moduleFilter != "" {
+				src, _ := m["source_node_id"].(string)
+				tgt, _ := m["target_node_id"].(string)
+				if !strings.Contains(src, moduleFilter) && !strings.Contains(tgt, moduleFilter) {
+					continue
+				}
+			}
+			if typeFilter != "" {
+				relType, _ := m["type"].(string)
+				if relType != typeFilter {
+					continue
+				}
+			}
+
+			count++
+			relType, _ := m["type"].(string)
+			src, _ := m["source_node_id"].(string)
+			tgt, _ := m["target_node_id"].(string)
+			fmt.Printf("  %s → %s  [%s]\n", src, tgt, relType)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("relations list: %w", err)
+	}
+
+	if count == 0 {
+		fmt.Println("No relations found. Run pcke scan to discover dependencies.")
+	} else {
+		fmt.Printf("\n%d relation(s)\n", count)
+	}
+	return nil
+}
+
+func runRelationsGraph() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("relations graph: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("relations graph: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Build adjacency map: module → [dependencies]
+	edges := make(map[string][]string)
+	if err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+		prefix := []byte("rel:")
+		c := rtx.Cursor()
+		for ok := c.Seek(prefix); ok; ok = c.Next() {
+			if !strings.HasPrefix(string(c.Key()), "rel:") {
+				break
+			}
+			var m map[string]any
+			if err := json.Unmarshal(c.Value(), &m); err != nil {
+				continue
+			}
+			src, _ := m["source_node_id"].(string)
+			tgt, _ := m["target_node_id"].(string)
+			relType, _ := m["type"].(string)
+			if relType == "imports" || relType == "depends_on" {
+				edges[src] = append(edges[src], tgt)
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("relations graph: %w", err)
+	}
+
+	if len(edges) == 0 {
+		fmt.Println("No module dependencies found.")
+		return nil
+	}
+
+	// Print text art graph sorted by source.
+	modules := make([]string, 0, len(edges))
+	for k := range edges {
+		modules = append(modules, k)
+	}
+	sort.Strings(modules)
+
+	for _, mod := range modules {
+		deps := edges[mod]
+		sort.Strings(deps)
+		fmt.Printf("%s\n", mod)
+		for i, dep := range deps {
+			if i == len(deps)-1 {
+				fmt.Printf("  └── %s\n", dep)
+			} else {
+				fmt.Printf("  ├── %s\n", dep)
+			}
+		}
+	}
+	return nil
+}
+
+func newCleanCmd() *cobra.Command {
+	var forceFlag bool
+	cmd := &cobra.Command{
+		Use:   "clean",
+		Short: "Remove the knowledge base",
+		Long: `Remove the .pcke/ directory and all knowledge base data.
+
+Requires confirmation unless --force is passed. Refuses to run outside a git repository.`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("clean: get working directory: %w", err)
+			}
+
+			// Safety: refuse outside git repo.
+			if _, err := os.Stat(cwd + "/.git"); os.IsNotExist(err) {
+				return fmt.Errorf("clean: not a git repository; refusing to delete .pcke/")
+			}
+
+			pckeDir := cwd + "/.pcke"
+			if _, err := os.Stat(pckeDir); os.IsNotExist(err) {
+				fmt.Println("Nothing to clean: .pcke/ does not exist.")
+				return nil
+			}
+
+			if !forceFlag {
+				fmt.Print("Remove .pcke/ and all knowledge base data? [y/N] ")
+				var answer string
+				fmt.Scanln(&answer) //nolint:errcheck // Best-effort interactive prompt.
+				if strings.ToLower(answer) != "y" {
+					fmt.Println("Aborted.")
+					return nil
+				}
+			}
+
+			if err := os.RemoveAll(pckeDir); err != nil {
+				return fmt.Errorf("clean: remove .pcke/: %w", err)
+			}
+
+			fmt.Println("Removed .pcke/")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&forceFlag, "force", false, "Skip confirmation prompt")
+	return cmd
+}
+
+// generateUUID returns a new random UUID v4 string.
+func generateUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 2
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func newWatchCmd() *cobra.Command {
+	var syncFlag, verbose bool
+
+	cmd := &cobra.Command{
+		Use:   "watch",
+		Short: "Watch for file changes and auto-scan",
+		Long: `Watch the repository for file changes and automatically run incremental scans.
+
+Changes are debounced (500ms) to avoid redundant scans during batch edits.
+The watcher respects .gitignore patterns and skips hidden directories.
+
+Press Ctrl+C to stop.
+
+Examples:
+  pcke watch                  Watch and scan on changes
+  pcke watch --sync           Also regenerate output files after each scan
+  pcke watch --verbose        Print all scan results (even no-ops)`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runWatch(syncFlag, verbose)
+		},
+	}
+
+	cmd.Flags().BoolVar(&syncFlag, "sync", false, "Run sync after each scan")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "Print scan results even when nothing changed")
+
+	return cmd
+}
+
+func runWatch(syncFlag, verbose bool) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("watch: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("watch: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	cfg := config.Defaults().Scan
+	opts := analysis.WatcherOpts{
+		Verbose: verbose,
+	}
+
+	if syncFlag {
+		opts.OnScan = func(_ *analysis.ScanResult) {
+			renderer := output.NewRenderer(cwd, db)
+			syncResult, syncErr := renderer.Sync(context.Background())
+			if syncErr != nil {
+				fmt.Fprintf(os.Stderr, "watch: sync error: %v\n", syncErr)
+				return
+			}
+			if verbose || syncResult.FilesWritten > 0 {
+				fmt.Printf("[watch] sync: %d files written\n", syncResult.FilesWritten)
+			}
+		}
+	}
+
+	w, err := analysis.NewWatcher(cwd, db, cfg, opts)
+	if err != nil {
+		return fmt.Errorf("watch: %w", err)
+	}
+
+	fmt.Println("Watching for changes... (Ctrl+C to stop)")
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	return w.Run(ctx)
+}
+
+func newShellCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "shell",
+		Short: "Interactive query shell",
+		Long: `Start an interactive REPL for querying the knowledge base.
+
+Built-in commands:
+  .collections          List queryable collections
+  .describe <name>      Show fields for a collection
+  .export json          Export last query results as JSON
+  .help                 Show this help
+  .quit                 Exit the shell
+
+Any other input is parsed as a DSL query and executed.
+
+Examples:
+  pcke shell
+  pcke> nodes where type = 'module'
+  pcke> .describe nodes
+  pcke> .quit`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runShell()
+		},
+	}
+}
+
+func runShell() error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("shell: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("shell: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	fmt.Println("pcke interactive shell. Type .help for commands, .quit to exit.")
+
+	sc := bufio.NewScanner(os.Stdin)
+	var lastResults *query.ResultSet
+
+	for {
+		fmt.Print("pcke> ")
+		if !sc.Scan() {
+			break
+		}
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+
+		rs, quit := shellDispatch(db, line, lastResults)
+		if quit {
+			return nil
+		}
+		if rs != nil {
+			lastResults = rs
+		}
+	}
+	return nil
+}
+
+func shellDispatch(db *kdb.DB, line string, lastResults *query.ResultSet) (*query.ResultSet, bool) {
+	switch {
+	case line == ".quit" || line == ".exit":
+		return nil, true
+	case line == ".help":
+		printShellHelp()
+	case line == ".collections":
+		shellListCollections()
+	case strings.HasPrefix(line, ".describe "):
+		shellDescribe(strings.TrimSpace(strings.TrimPrefix(line, ".describe ")))
+	case line == ".export json":
+		shellExportJSON(lastResults)
+	default:
+		return shellExecQuery(db, line), false
+	}
+	return nil, false
+}
+
+func shellListCollections() {
+	for _, name := range query.Collections() {
+		schema := query.CollectionSchema(name)
+		fmt.Printf("  %-14s (%d fields)\n", name, len(schema))
+	}
+}
+
+func shellDescribe(name string) {
+	schema := query.CollectionSchema(name)
+	if schema == nil {
+		fmt.Printf("Unknown collection %q. Use .collections to list.\n", name)
+		return
+	}
+	fmt.Printf("Collection: %s\n", name)
+	for _, field := range schema.FieldNames() {
+		fmt.Printf("  %-16s %s\n", field, schema[field])
+	}
+}
+
+func shellExportJSON(lastResults *query.ResultSet) {
+	if lastResults == nil || len(lastResults.Rows) == 0 {
+		fmt.Println("No results to export. Run a query first.")
+		return
+	}
+	data, err := json.MarshalIndent(lastResults.Rows, "", "  ")
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	fmt.Println(string(data))
+}
+
+func shellExecQuery(db *kdb.DB, line string) *query.ResultSet {
+	start := time.Now()
+	rs, err := executeShellQuery(db, line)
+	elapsed := time.Since(start)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return nil
+	}
+	printShellResults(rs, elapsed)
+	return rs
+}
+
+func executeShellQuery(db *kdb.DB, dsl string) (*query.ResultSet, error) {
+	q, err := query.Parse(dsl)
+	if err != nil {
+		return nil, err
+	}
+	if err := query.TypeCheck(q); err != nil {
+		return nil, err
+	}
+	plan := query.BuildPlan(q)
+	return query.Execute(context.Background(), db, plan)
+}
+
+func printShellResults(rs *query.ResultSet, elapsed time.Duration) {
+	if len(rs.Rows) == 0 {
+		fmt.Printf("No results. (%s)\n", elapsed.Round(time.Microsecond))
+		return
+	}
+	for i, row := range rs.Rows {
+		fmt.Printf("--- result %d ---\n", i+1)
+		for k, v := range row {
+			fmt.Printf("  %s: %v\n", k, v)
+		}
+	}
+	fmt.Printf("\n%d result(s) in %s\n", len(rs.Rows), elapsed.Round(time.Microsecond))
+}
+
+func printShellHelp() {
+	fmt.Println(`Built-in commands:
+  .collections          List queryable collections
+  .describe <name>      Show fields for a collection
+  .export json          Export last query results as JSON
+  .help                 Show this help
+  .quit                 Exit the shell
+
+Any other input is executed as a DSL query.`)
 }

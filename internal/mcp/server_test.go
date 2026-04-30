@@ -119,7 +119,7 @@ func seedDB(t *testing.T) *kdb.DB {
 func startTestServer(t *testing.T, db *kdb.DB) *mcptest.Server {
 	t.Helper()
 
-	srv := pckmcp.New(db)
+	srv := pckmcp.New(db, t.TempDir())
 
 	// Extract registered tools and resources from the pcke MCPServer.
 	ts := mcptest.NewUnstartedServer(t)
