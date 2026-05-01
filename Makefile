@@ -129,6 +129,14 @@ verify-phase-4: tools-check lint test test-race test-debug build ## Phase 4 DoD:
 	@echo "✓ verify-phase-4: all gates passed."
 
 # ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
+.PHONY: install
+install: build ## Install pcke to $(GOPATH)/bin
+	@install -m 755 $(BIN_DIR)/pcke "$$($(GO) env GOPATH)/bin/pcke"
+	@echo "Installed: $$($(GO) env GOPATH)/bin/pcke ($(VERSION))"
+
+# ---------------------------------------------------------------------------
 # Release
 # ---------------------------------------------------------------------------
 .PHONY: release-dryrun

@@ -1,6 +1,6 @@
 # pcke — Project Context & Knowledge Engine
 
-> **Status: v1.0** (all phases complete)
+> **Status: v1.2** (CLI Track complete)
 
 **pcke** is a Long-Term Engineering Memory — a local system that extracts
 knowledge from codebases and serves it to AI coding agents (GitHub Copilot,
@@ -13,39 +13,103 @@ years of project history.
   language — built from scratch.
 - **MCP server.** Exposes project knowledge to AI agents via the Model Context Protocol.
 
-## Quickstart
+## Installation
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew install jenaiz/tap/pcke
+```
+
+### go install
+
+```bash
+go install github.com/jenaiz/pcke/cmd/pcke@latest
+```
+
+### Install script (macOS/Linux)
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/jenaiz/pcke/main/install.sh | sh
+```
+
+To install a specific version:
+
+```bash
+VERSION=v1.2.1 curl -sSfL https://raw.githubusercontent.com/jenaiz/pcke/main/install.sh | sh
+```
+
+### Container
+
+```bash
+docker run --rm -v "$PWD:/project" -w /project ghcr.io/jenaiz/pcke scan
+```
+
+### Binary download
+
+Download the appropriate archive from [GitHub Releases](https://github.com/jenaiz/pcke/releases):
+
+| Platform | Archive |
+|----------|---------|
+| macOS (Apple Silicon) | `pcke_*_darwin_arm64.tar.gz` |
+| macOS (Intel) | `pcke_*_darwin_amd64.tar.gz` |
+| Linux (x86_64) | `pcke_*_linux_amd64.tar.gz` |
+| Linux (ARM64) | `pcke_*_linux_arm64.tar.gz` |
+| Windows (x86_64) | `pcke_*_windows_amd64.zip` |
+| Windows (ARM64) | `pcke_*_windows_arm64.zip` |
+
+### From source
 
 ```bash
 git clone https://github.com/jenaiz/pcke.git
 cd pcke
-make verify   # lint + test + build
-
-# Scan the repository and build the knowledge base
-./bin/pcke scan
-
-# Deep analysis with AST extraction (requires C compiler for tree-sitter)
-./bin/pcke scan --deep
-
-# Generate context files for AI agents
-./bin/pcke sync
-
-# Full-text search
-./bin/pcke recall "error handling strategy"
-
-# Watch for changes and auto-scan
-./bin/pcke watch
-
-# Interactive query shell
-./bin/pcke shell
-
-# Offline compaction (reclaim space after deletions)
-./bin/pcke compact
-
-# Start MCP server (stdio transport)
-./bin/pcke serve
+make install
 ```
 
-Requirements: **Go 1.25+**, a **C compiler** (for tree-sitter / CGo), [golangci-lint](https://golangci-lint.run/) v2.
+### Verify with cosign
+
+All release checksums are signed with [cosign](https://github.com/sigstore/cosign) keyless (OIDC):
+
+```bash
+cosign verify-blob \
+  --certificate-identity-regexp="github.com/jenaiz/pcke" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+  --signature checksums.txt.sig \
+  checksums.txt
+```
+
+## Quickstart
+
+```bash
+# Install pcke (see Installation above for other methods)
+brew install jenaiz/tap/pcke
+
+# Scan the repository and build the knowledge base
+pcke scan
+
+# Deep analysis with AST extraction (requires C compiler for tree-sitter)
+pcke scan --deep
+
+# Generate context files for AI agents
+pcke sync
+
+# Full-text search
+pcke recall "error handling strategy"
+
+# Watch for changes and auto-scan
+pcke watch
+
+# Interactive query shell
+pcke shell
+
+# Offline compaction (reclaim space after deletions)
+pcke compact
+
+# Start MCP server (stdio transport)
+pcke serve
+```
+
+Requirements: **Go 1.25+** (only for building from source), a **C compiler** (for tree-sitter / CGo deep scans), [golangci-lint](https://golangci-lint.run/) v2 (for development).
 
 > **Note:** `pcke` uses [go-git](https://github.com/go-git/go-git) for Git
 > history analysis and [go-tree-sitter](https://github.com/smacker/go-tree-sitter)

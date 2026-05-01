@@ -28,6 +28,7 @@ builds:
     goos:
       - darwin
       - linux
+      - windows
     goarch:
       - amd64
       - arm64
@@ -35,6 +36,9 @@ builds:
 archives:
   - id: pcke
     formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
@@ -70,3 +74,17 @@ signs:
       - "${artifact}"
     artifacts: checksum
     output: true
+
+brews:
+  - repository:
+      owner: jenaiz
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/jenaiz/pcke
+    description: "Project Context & Knowledge Engine — long-term engineering memory for AI agents"
+    license: Apache-2.0
+    install: |
+      bin.install "pcke"
+    test: |
+      system bin/"pcke", "--version"

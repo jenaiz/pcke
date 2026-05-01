@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +15,14 @@ import (
 
 // version is injected at build time via `-ldflags "-X main.version=..."`.
 var version = "dev"
+
+func init() {
+	if version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			version = info.Main.Version
+		}
+	}
+}
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{

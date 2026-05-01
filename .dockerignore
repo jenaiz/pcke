@@ -1,0 +1,6 @@
+.pcke/
+.git/
+dist/
+bin/
+*.out
+cover.html
