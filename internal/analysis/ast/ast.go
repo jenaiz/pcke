@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Package ast provides tree-sitter powered AST analysis for source code
 // entity extraction. It supports Go, Python, JavaScript, TypeScript, and Java.
 //

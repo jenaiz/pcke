@@ -243,3 +243,26 @@ func TestCompactEmptyDB(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+// TestCompactClosedDB verifies that Compact returns ErrDBClosed on a closed database.
+func TestCompactClosedDB(t *testing.T) {
+	dir := testDir(t)
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ctx := context.Background()
+	_, err = db.Compact(ctx)
+	if err == nil {
+		t.Fatal("expected error on compact of closed DB")
+	}
+}
+
+// Coverage gap: OS error paths in compactSwap/openCompactTarget (Truncate,
+// Sync, wireSubsystems, Rename failures) require filesystem mocking or
+// fault injection not available in the standard library. The remaining
+// uncovered branches in these functions handle kernel-level I/O errors.

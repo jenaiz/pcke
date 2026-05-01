@@ -115,10 +115,9 @@ func BuildPlan(q *Query) *Plan {
 
 	// Check for range conditions on indexed fields (future: use RangeScan).
 	if bestIdx == -1 {
-		for i, cond := range q.Where.Conditions {
+		for _, cond := range q.Where.Conditions {
 			if isRangeOp(cond.Operator) {
 				if _, ok := idxMap[cond.Field]; ok {
-					bestIdx = i
 					plan.Strategy = RangeScan
 					break
 				}
@@ -131,9 +130,7 @@ func BuildPlan(q *Query) *Plan {
 	// implement native IndexSeek; it always falls back to FullScan with
 	// filter evaluation. Removing the indexed condition here would cause
 	// unfiltered results. TODO: remove once executor supports IndexSeek.
-	for _, cond := range q.Where.Conditions {
-		plan.Filters = append(plan.Filters, cond)
-	}
+	plan.Filters = append(plan.Filters, q.Where.Conditions...)
 
 	// Rebuild operators list for remaining filters.
 	if len(plan.Filters) > 1 {
