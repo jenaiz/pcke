@@ -75,16 +75,18 @@ signs:
     artifacts: checksum
     output: true
 
-brews:
+homebrew_casks:
   - repository:
       owner: jenaiz
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
     homepage: https://github.com/jenaiz/pcke
     description: "Project Context & Knowledge Engine — long-term engineering memory for AI agents"
-    license: Apache-2.0
-    install: |
-      bin.install "pcke"
-    test: |
-      system bin/"pcke", "--version"
+    binaries:
+      - pcke
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/pcke"]
+          end
