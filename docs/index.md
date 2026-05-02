@@ -12,6 +12,7 @@ local knowledge base for AI assistants.
 - [Annotations](annotations.md) — in-code `@pcke-rule` / `@pcke-lesson`
 - [Schema Migrations](schema-migrations.md) — `pcke migrate` usage
 - [Advanced MCP](advanced-mcp.md) — streaming, subscriptions, prompt templates
+- [Onboarding Mode](onboarding.md) — auto-generated project walkthroughs
 
 ## Overview
 

@@ -64,6 +64,7 @@ func newRootCmd() *cobra.Command {
 		newCleanCmd(),
 		newWatchCmd(),
 		newShellCmd(),
+		newOnboardCmd(),
 	)
 
 	return root

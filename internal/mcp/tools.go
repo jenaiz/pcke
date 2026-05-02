@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jenaiz/pcke/internal/analysis"
+	"github.com/jenaiz/pcke/internal/onboard"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -49,6 +50,20 @@ func (s *Server) registerTools() {
 			mcplib.Description("Relative file path (e.g. 'internal/kdb/db.go')"),
 		),
 	), s.handleGetHistory)
+
+	// get_onboarding — auto-generated project walkthrough.
+	s.srv.AddTool(mcplib.NewTool("get_onboarding",
+		mcplib.WithDescription("Generate a project walkthrough for new developers: architecture, entry points, key modules, conventions"),
+		mcplib.WithString("section",
+			mcplib.Description("Filter to a specific section (e.g. 'overview', 'architecture', 'entry_points', 'key_modules', 'conventions', 'constraints', 'decisions')"),
+		),
+		mcplib.WithString("module",
+			mcplib.Description("Scope walkthrough to a specific module"),
+		),
+		mcplib.WithString("depth",
+			mcplib.Description("Walkthrough depth: 'shallow' or 'full' (default: full)"),
+		),
+	), s.handleGetOnboarding)
 }
 
 // handleRecall performs a text search over knowledge nodes.
@@ -329,4 +344,97 @@ func scoreNode(node analysis.KnowledgeNode, terms []string) int {
 	}
 
 	return score
+}
+
+// handleGetOnboarding generates a project walkthrough.
+func (s *Server) handleGetOnboarding(
+	ctx context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	w, err := s.buildOnboarding(ctx, request)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("onboarding: %v", err)), nil
+	}
+
+	text, err := onboard.RenderJSON(w)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("render: %v", err)), nil
+	}
+
+	if len(text) > 4096 {
+		sw := NewStreamWriter(ctx, 0, 0)
+		if err := sw.WriteItem(text); err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", err)), nil
+		}
+		flushed, err := sw.Flush()
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(flushed), nil
+	}
+
+	return mcplib.NewToolResultText(text), nil
+}
+
+func (s *Server) buildOnboarding(ctx context.Context, request mcplib.CallToolRequest) (*onboard.Walkthrough, error) {
+	nodes, err := s.loadNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load nodes: %w", err)
+	}
+
+	rels, err := s.loadRelations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load relations: %w", err)
+	}
+
+	logs, err := s.loadEvolutionLogs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load evolution logs: %w", err)
+	}
+
+	cfg, err := onboard.LoadConfig(s.root)
+	if err != nil {
+		cfg = onboard.DefaultConfig()
+	}
+
+	engine := &onboard.Engine{
+		Nodes:     nodes,
+		Relations: rels,
+		EvolLogs:  logs,
+		RepoPath:  s.root,
+		Config:    cfg,
+	}
+
+	module := request.GetString("module", "")
+	depth := request.GetString("depth", "full")
+	section := request.GetString("section", "")
+
+	var w *onboard.Walkthrough
+	if module != "" {
+		w, err = engine.GenerateForModule(ctx, module)
+	} else {
+		w, err = engine.Generate(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if depth == "shallow" && len(w.Sections) > 3 {
+		w.Sections = w.Sections[:3]
+	}
+
+	if section != "" {
+		var filtered []onboard.Section
+		for _, s := range w.Sections {
+			if s.Name == section {
+				filtered = append(filtered, s)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("section %q not found", section)
+		}
+		w.Sections = filtered
+	}
+
+	return w, nil
 }

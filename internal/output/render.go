@@ -135,8 +135,8 @@ func (r *Renderer) writeFile(relPath, content string) error {
 	return os.WriteFile(fullPath, []byte(content), 0o600)
 }
 
-// groupByModule organises nodes by their module field.
-func groupByModule(nodes []analysis.KnowledgeNode) map[string][]analysis.KnowledgeNode {
+// GroupByModule organises nodes by their module field.
+func GroupByModule(nodes []analysis.KnowledgeNode) map[string][]analysis.KnowledgeNode {
 	m := map[string][]analysis.KnowledgeNode{}
 	for _, n := range nodes {
 		if n.Module != "" {
@@ -144,6 +144,11 @@ func groupByModule(nodes []analysis.KnowledgeNode) map[string][]analysis.Knowled
 		}
 	}
 	return m
+}
+
+// groupByModule is a private alias kept for internal callers during migration.
+func groupByModule(nodes []analysis.KnowledgeNode) map[string][]analysis.KnowledgeNode {
+	return GroupByModule(nodes)
 }
 
 // sortedModuleNames returns module names sorted alphabetically.

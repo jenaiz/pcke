@@ -24,6 +24,7 @@ import (
 	kdbquery "github.com/jenaiz/pcke/internal/kdb/query"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/mcp"
+	"github.com/jenaiz/pcke/internal/onboard"
 	"github.com/jenaiz/pcke/internal/output"
 	"github.com/jenaiz/pcke/internal/query"
 )
@@ -1833,4 +1834,176 @@ func printShellHelp() {
   .quit                 Exit the shell
 
 Any other input is executed as a DSL query.`)
+}
+
+func newOnboardCmd() *cobra.Command {
+	var (
+		format     string
+		module     string
+		depth      string
+		outputFile string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "onboard",
+		Short: "Generate a project walkthrough for new developers",
+		Long: `Generate an interactive, auto-guided walkthrough combining architecture,
+key modules, conventions, constraints, and entry points.
+
+Examples:
+  pcke onboard
+  pcke onboard --format=markdown
+  pcke onboard --module=internal/kdb
+  pcke onboard --output=file
+  pcke onboard --depth=shallow`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runOnboard(format, module, depth, outputFile)
+		},
+	}
+
+	cmd.Flags().StringVar(&format, "format", "text", "Output format: text, json, or markdown")
+	cmd.Flags().StringVar(&module, "module", "", "Scope walkthrough to a specific module")
+	cmd.Flags().StringVar(&depth, "depth", "full", "Walkthrough depth: shallow or full")
+	cmd.Flags().StringVar(&outputFile, "output", "", "Write to file (use 'file' for ONBOARDING.md)")
+
+	return cmd
+}
+
+func runOnboard(format, module, depth, outputFile string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("onboard: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("onboard: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	warnBranchMismatch(db, cwd)
+
+	ctx := context.Background()
+	nodes, err := output.LoadNodes(ctx, db)
+	if err != nil {
+		return fmt.Errorf("onboard: load nodes: %w", err)
+	}
+
+	rels, err := loadRelationsFromDB(ctx, db)
+	if err != nil {
+		return fmt.Errorf("onboard: load relations: %w", err)
+	}
+
+	logs, err := loadEvolutionLogsFromDB(ctx, db)
+	if err != nil {
+		return fmt.Errorf("onboard: load evolution logs: %w", err)
+	}
+
+	cfg, err := onboard.LoadConfig(cwd)
+	if err != nil {
+		return fmt.Errorf("onboard: load config: %w", err)
+	}
+
+	engine := &onboard.Engine{
+		Nodes:     nodes,
+		Relations: rels,
+		EvolLogs:  logs,
+		RepoPath:  cwd,
+		Config:    cfg,
+	}
+
+	var w *onboard.Walkthrough
+	if module != "" {
+		w, err = engine.GenerateForModule(ctx, module)
+	} else {
+		w, err = engine.Generate(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("onboard: generate walkthrough: %w", err)
+	}
+
+	if depth == "shallow" && len(w.Sections) > 3 {
+		w.Sections = w.Sections[:3]
+	}
+
+	return outputWalkthrough(w, format, outputFile)
+}
+
+func outputWalkthrough(w *onboard.Walkthrough, format, outputFile string) error {
+	var rendered string
+	var err error
+	switch format {
+	case "json":
+		rendered, err = onboard.RenderJSON(w)
+		if err != nil {
+			return err
+		}
+	case "markdown":
+		rendered = onboard.RenderMarkdown(w)
+	default:
+		rendered = onboard.RenderText(w)
+	}
+
+	if outputFile == "file" {
+		outputFile = "ONBOARDING.md"
+	}
+	if outputFile != "" {
+		outContent := rendered
+		if format == "text" {
+			outContent = onboard.RenderMarkdown(w)
+		}
+		if err := os.WriteFile(outputFile, []byte(outContent), 0o600); err != nil {
+			return fmt.Errorf("onboard: write file: %w", err)
+		}
+		fmt.Printf("Walkthrough written to %s\n", outputFile)
+		return nil
+	}
+
+	fmt.Print(rendered)
+	return nil
+}
+
+func loadRelationsFromDB(ctx context.Context, db *kdb.DB) ([]analysis.Relation, error) {
+	var rels []analysis.Relation
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
+		prefix := []byte("rel:")
+		cursor := rtx.Cursor()
+		for ok := cursor.Seek(prefix); ok; ok = cursor.Next() {
+			k := cursor.Key()
+			if !strings.HasPrefix(string(k), "rel:") {
+				break
+			}
+			var rel analysis.Relation
+			if err := json.Unmarshal(cursor.Value(), &rel); err != nil {
+				continue
+			}
+			rels = append(rels, rel)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return rels, nil
+}
+
+func loadEvolutionLogsFromDB(ctx context.Context, db *kdb.DB) ([]analysis.EvolutionLog, error) {
+	var logs []analysis.EvolutionLog
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
+		prefix := []byte("el:")
+		cursor := rtx.Cursor()
+		for ok := cursor.Seek(prefix); ok; ok = cursor.Next() {
+			k := cursor.Key()
+			if !strings.HasPrefix(string(k), "el:") {
+				break
+			}
+			var el analysis.EvolutionLog
+			if err := json.Unmarshal(cursor.Value(), &el); err != nil {
+				continue
+			}
+			logs = append(logs, el)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return logs, nil
 }
