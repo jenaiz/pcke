@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/jenaiz/pcke/internal/analysis"
+	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/onboard"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
@@ -64,6 +66,35 @@ func (s *Server) registerTools() {
 			mcplib.Description("Walkthrough depth: 'shallow' or 'full' (default: full)"),
 		),
 	), s.handleGetOnboarding)
+
+	// query_federation — executes DSL query across all federated repos.
+	s.srv.AddTool(mcplib.NewTool("query_federation",
+		mcplib.WithDescription("Execute a pcke DSL query across all federated repositories"),
+		mcplib.WithString("query",
+			mcplib.Required(),
+			mcplib.Description("DSL query to execute (e.g. 'nodes WHERE module = \"internal/kdb\"')"),
+		),
+		mcplib.WithString("repos",
+			mcplib.Description("Comma-separated repo names to query (empty = all federated repos)"),
+		),
+		mcplib.WithNumber("limit",
+			mcplib.Description("Maximum total results (default 50)"),
+		),
+	), s.handleQueryFederation)
+
+	// get_cross_repo_deps — returns cross-repo dependency graph.
+	s.srv.AddTool(mcplib.NewTool("get_cross_repo_deps",
+		mcplib.WithDescription("Get cross-repository dependencies for a module or node"),
+		mcplib.WithString("node_id",
+			mcplib.Description("Filter to dependencies involving this node"),
+		),
+		mcplib.WithString("module",
+			mcplib.Description("Filter to dependencies involving this module"),
+		),
+		mcplib.WithString("direction",
+			mcplib.Description("Direction: 'incoming', 'outgoing', or 'both' (default 'both')"),
+		),
+	), s.handleGetCrossRepoDeps)
 }
 
 // handleRecall performs a text search over knowledge nodes.
@@ -437,4 +468,143 @@ func (s *Server) buildOnboarding(ctx context.Context, request mcplib.CallToolReq
 	}
 
 	return w, nil
+}
+
+// handleQueryFederation executes a DSL query across federated repos.
+func (s *Server) handleQueryFederation(
+	ctx context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	dsl, err := request.RequireString("query")
+	if err != nil {
+		return mcplib.NewToolResultError("query parameter required"), nil
+	}
+
+	limit := 50
+	if l := request.GetFloat("limit", 0); l > 0 {
+		limit = int(l)
+	}
+
+	manifest, err := federation.LoadManifest()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("load federation manifest: %v", err)), nil
+	}
+	if len(manifest.Repos) == 0 {
+		return mcplib.NewToolResultText("No federated repos configured. Use `pcke federation add` to add repos."), nil
+	}
+
+	opts := federation.QueryOpts{Limit: limit}
+	reposStr := request.GetString("repos", "")
+	if reposStr != "" {
+		opts.RepoFilter = strings.Split(reposStr, ",")
+		for i := range opts.RepoFilter {
+			opts.RepoFilter[i] = strings.TrimSpace(opts.RepoFilter[i])
+		}
+	}
+
+	rs, err := federation.QueryFederation(ctx, manifest, dsl, opts)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("federation query: %v", err)), nil
+	}
+
+	result := map[string]any{
+		"total_results":    len(rs.Results),
+		"repos_queried":    rs.Repos,
+		"partial_failures": len(rs.Errors),
+	}
+
+	rows := make([]map[string]any, 0, len(rs.Results))
+	for _, r := range rs.Results {
+		rows = append(rows, r.Row)
+	}
+	result["results"] = rows
+
+	if len(rs.Errors) > 0 {
+		errs := make([]map[string]string, 0, len(rs.Errors))
+		for _, e := range rs.Errors {
+			errs = append(errs, map[string]string{
+				"repo":  e.Repo,
+				"error": e.Error.Error(),
+			})
+		}
+		result["errors"] = errs
+	}
+
+	out, _ := json.MarshalIndent(result, "", "  ")
+	text := string(out)
+
+	if len(text) > 4096 {
+		sw := NewStreamWriter(ctx, 0, 0)
+		if err := sw.WriteItem(text); err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", err)), nil
+		}
+		flushed, err := sw.Flush()
+		if err != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", err)), nil
+		}
+		return mcplib.NewToolResultText(flushed), nil
+	}
+
+	return mcplib.NewToolResultText(text), nil
+}
+
+// handleGetCrossRepoDeps returns cross-repo dependencies.
+func (s *Server) handleGetCrossRepoDeps(
+	ctx context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	manifest, err := federation.LoadManifest()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("load federation manifest: %v", err)), nil
+	}
+
+	deps, err := federation.DetectCrossRepoDeps(ctx, manifest, s.root)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("detect deps: %v", err)), nil
+	}
+
+	nodeID := request.GetString("node_id", "")
+	module := request.GetString("module", "")
+	direction := request.GetString("direction", "both")
+
+	filtered := filterCrossRepoDeps(deps, nodeID, module, direction)
+
+	result := map[string]any{
+		"total_deps": len(filtered),
+		"deps":       filtered,
+	}
+	out, _ := json.MarshalIndent(result, "", "  ")
+	return mcplib.NewToolResultText(string(out)), nil
+}
+
+// filterCrossRepoDeps applies node/module/direction filters to the dependency list.
+func filterCrossRepoDeps(deps []federation.CrossRepoDep, nodeID, module, direction string) []federation.CrossRepoDep {
+	var filtered []federation.CrossRepoDep
+	for _, d := range deps {
+		if nodeID != "" && !matchesDirection(d, nodeID, direction) {
+			continue
+		}
+		if module != "" && d.TargetModule != module && d.SourceNodeID != module {
+			continue
+		}
+		filtered = append(filtered, d)
+	}
+	if len(filtered) == 0 && len(deps) > 0 {
+		return deps
+	}
+	return filtered
+}
+
+func matchesDirection(d federation.CrossRepoDep, nodeID, direction string) bool {
+	if direction == "outgoing" || direction == "both" {
+		if d.SourceNodeID == nodeID {
+			return true
+		}
+	}
+	if direction == "incoming" || direction == "both" {
+		if d.TargetModule == nodeID {
+			return true
+		}
+	}
+	return false
 }

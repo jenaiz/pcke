@@ -18,6 +18,7 @@ import (
 
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/config"
+	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/index/fts"
 	"github.com/jenaiz/pcke/internal/kdb/migrate"
@@ -2242,5 +2243,368 @@ func printImpactReport(report *migrate.ImpactReport, op *migrate.AlterOp) {
 	}
 	if report.IsIdempotent {
 		fmt.Printf("Status:            IDEMPOTENT (already applied)\n")
+	}
+}
+
+// --- Federation commands (Phase 8) ---
+
+func newFederationCmd() *cobra.Command {
+	var format string
+
+	cmd := &cobra.Command{
+		Use:   "federation",
+		Short: "Manage multi-repo federation",
+		Long: `Manage the pcke multi-repo federation.
+
+Federate knowledge bases from multiple repositories into a unified view.
+Enable cross-repo queries, dependency detection, and shared constraints.
+
+Examples:
+  pcke federation add backend-api /path/to/backend
+  pcke federation list
+  pcke federation query "FROM nodes WHERE module = \"internal/kdb\""
+  pcke federation deps --module=internal/kdb
+  pcke federation constraints`,
+	}
+
+	cmd.PersistentFlags().StringVar(&format, "format", "text", "Output format: text or json")
+
+	cmd.AddCommand(
+		newFederationAddCmd(&format),
+		newFederationRemoveCmd(&format),
+		newFederationListCmd(&format),
+		newFederationQueryCmd(&format),
+		newFederationDepsCmd(&format),
+		newFederationConstraintsCmd(&format),
+	)
+
+	return cmd
+}
+
+func newFederationAddCmd(format *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "add <name> <path>",
+		Short: "Add a repository to the federation",
+		Long: `Add a repository to the federation manifest.
+
+The repo will be included in cross-repo queries and dependency detection.
+Idempotent: if the repo name exists, its path is updated.
+
+Examples:
+  pcke federation add backend-api /path/to/backend
+  pcke federation add shared-lib ~/projects/shared-lib`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name, path := args[0], args[1]
+
+			m, err := federation.LoadManifest()
+			if err != nil {
+				return fmt.Errorf("federation add: %w", err)
+			}
+
+			federation.AddRepo(m, name, path)
+
+			if err := federation.SaveManifest(m); err != nil {
+				return fmt.Errorf("federation add: %w", err)
+			}
+
+			if *format == "json" {
+				out, _ := json.Marshal(map[string]string{"status": "added", "name": name, "path": path})
+				fmt.Println(string(out))
+			} else {
+				fmt.Printf("Added %q → %s\n", name, path)
+			}
+			return nil
+		},
+	}
+}
+
+func newFederationRemoveCmd(format *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a repository from the federation",
+		Long: `Remove a repository from the federation manifest.
+
+Examples:
+  pcke federation remove backend-api`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			name := args[0]
+
+			m, err := federation.LoadManifest()
+			if err != nil {
+				return fmt.Errorf("federation remove: %w", err)
+			}
+
+			federation.RemoveRepo(m, name)
+
+			if err := federation.SaveManifest(m); err != nil {
+				return fmt.Errorf("federation remove: %w", err)
+			}
+
+			if *format == "json" {
+				out, _ := json.Marshal(map[string]string{"status": "removed", "name": name})
+				fmt.Println(string(out))
+			} else {
+				fmt.Printf("Removed %q from federation.\n", name)
+			}
+			return nil
+		},
+	}
+}
+
+func newFederationListCmd(format *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List federated repositories and their health status",
+		Long: `List all repositories in the federation manifest with health status.
+
+Examples:
+  pcke federation list
+  pcke federation list --format=json`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			m, err := federation.LoadManifest()
+			if err != nil {
+				return fmt.Errorf("federation list: %w", err)
+			}
+
+			if len(m.Repos) == 0 {
+				if *format == "json" {
+					fmt.Println("[]")
+				} else {
+					fmt.Println("No federated repos configured.")
+				}
+				return nil
+			}
+
+			health := federation.ValidateRepos(m)
+
+			if *format == "json" {
+				out, _ := json.MarshalIndent(health, "", "  ")
+				fmt.Println(string(out))
+			} else {
+				if m.Federation.Name != "" {
+					fmt.Printf("Federation: %s\n\n", m.Federation.Name)
+				}
+				for _, h := range health {
+					status := "✓"
+					if !h.Valid {
+						status = "✗"
+					}
+					fmt.Printf("  %s %s\n", status, h.Name)
+					fmt.Printf("    Path: %s\n", h.Path)
+					if !h.Valid {
+						fmt.Printf("    Problem: %s\n", h.Problem)
+					}
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newFederationQueryCmd(format *string) *cobra.Command {
+	var timeout time.Duration
+	var concurrency int
+
+	cmd := &cobra.Command{
+		Use:   "query <dsl>",
+		Short: "Execute a cross-repo query",
+		Long: `Execute a pcke DSL query across all federated repositories.
+
+Results are merged and annotated with their source repository.
+Partial failures (e.g., a repo that can't be opened) don't block results
+from healthy repos.
+
+Examples:
+  pcke federation query "FROM nodes WHERE module = \"internal/kdb\""
+  pcke federation query "FROM nodes WHERE type = \"function\"" --timeout=5s
+  pcke federation query "FROM constraints" --format=json`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			dsl := args[0]
+
+			m, err := federation.LoadManifest()
+			if err != nil {
+				return fmt.Errorf("federation query: %w", err)
+			}
+
+			if len(m.Repos) == 0 {
+				fmt.Println("No federated repos configured. Use `pcke federation add` first.")
+				return nil
+			}
+
+			ctx := context.Background()
+			rs, err := federation.QueryFederation(ctx, m, dsl, federation.QueryOpts{
+				Timeout:     timeout,
+				Concurrency: concurrency,
+			})
+			if err != nil {
+				return fmt.Errorf("federation query: %w", err)
+			}
+
+			if *format == "json" {
+				out, _ := json.MarshalIndent(rs, "", "  ")
+				fmt.Println(string(out))
+			} else {
+				fmt.Printf("Queried %d repos, %d results", len(rs.Repos)+len(rs.Errors), len(rs.Results))
+				if len(rs.Errors) > 0 {
+					fmt.Printf(" (%d partial failures)", len(rs.Errors))
+				}
+				fmt.Println()
+				fmt.Println()
+				for _, r := range rs.Results {
+					name, _ := r.Row["name"].(string)
+					module, _ := r.Row["module"].(string)
+					fmt.Printf("  [%s] %s", r.Repo, name)
+					if module != "" {
+						fmt.Printf(" (%s)", module)
+					}
+					fmt.Println()
+				}
+				if len(rs.Errors) > 0 {
+					fmt.Println()
+					fmt.Println("Errors:")
+					for _, e := range rs.Errors {
+						fmt.Printf("  %s: %v\n", e.Repo, e.Error)
+					}
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "Per-repo query timeout")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 4, "Max concurrent repo queries")
+	return cmd
+}
+
+func newFederationDepsCmd(format *string) *cobra.Command {
+	var module string
+
+	cmd := &cobra.Command{
+		Use:   "deps",
+		Short: "Show cross-repo dependencies",
+		Long: `Detect and display cross-repo dependencies.
+
+Analyzes Go import statements to find packages imported from other
+federated repositories.
+
+Examples:
+  pcke federation deps
+  pcke federation deps --module=internal/kdb
+  pcke federation deps --format=json`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("federation deps: %w", err)
+			}
+
+			m, err := federation.LoadManifest()
+			if err != nil {
+				return fmt.Errorf("federation deps: %w", err)
+			}
+
+			ctx := context.Background()
+			deps, err := federation.DetectCrossRepoDeps(ctx, m, cwd)
+			if err != nil {
+				return fmt.Errorf("federation deps: %w", err)
+			}
+
+			if module != "" {
+				var filtered []federation.CrossRepoDep
+				for _, d := range deps {
+					if d.TargetModule == module || strings.Contains(d.SourceNodeID, module) {
+						filtered = append(filtered, d)
+					}
+				}
+				deps = filtered
+			}
+
+			if *format == "json" {
+				out, _ := json.MarshalIndent(deps, "", "  ")
+				fmt.Println(string(out))
+			} else {
+				if len(deps) == 0 {
+					fmt.Println("No cross-repo dependencies detected.")
+					return nil
+				}
+				fmt.Printf("Cross-repo dependencies (%d):\n\n", len(deps))
+				for _, d := range deps {
+					fmt.Printf("  %s → %s/%s\n", d.SourceNodeID, d.TargetRepo, d.TargetModule)
+					fmt.Printf("    import: %s (via %s)\n", d.ImportPath, d.DetectedVia)
+				}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&module, "module", "", "Filter by module name")
+	return cmd
+}
+
+func newFederationConstraintsCmd(format *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "constraints",
+		Short: "Show org-wide constraints and violations",
+		Long: `Display org-wide constraints from the federation manifest and check
+for violations in the current repository.
+
+Examples:
+  pcke federation constraints
+  pcke federation constraints --format=json`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("federation constraints: %w", err)
+			}
+
+			m, err := federation.LoadManifest()
+			if err != nil {
+				return fmt.Errorf("federation constraints: %w", err)
+			}
+
+			if len(m.Constraints.Rules) == 0 {
+				if *format == "json" {
+					fmt.Println(`{"rules":[],"violations":[]}`)
+				} else {
+					fmt.Println("No org-wide constraints configured.")
+				}
+				return nil
+			}
+
+			db, err := kdb.Open(cwd, nil)
+			if err != nil {
+				return fmt.Errorf("federation constraints: open db: %w", err)
+			}
+			defer db.Close() //nolint:errcheck // best-effort close
+
+			ctx := context.Background()
+			violations, err := federation.CheckOrgConstraints(ctx, db, m)
+			if err != nil {
+				return fmt.Errorf("federation constraints: %w", err)
+			}
+
+			if *format == "json" {
+				result := map[string]any{
+					"rules":      m.Constraints.Rules,
+					"violations": violations,
+				}
+				out, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Println(string(out))
+			} else {
+				fmt.Printf("Org-wide constraints (%d):\n\n", len(m.Constraints.Rules))
+				for _, r := range m.Constraints.Rules {
+					fmt.Printf("  [%s] %s — %s\n", r.Severity, r.Scope, r.Description)
+				}
+				if len(violations) > 0 {
+					fmt.Printf("\nViolations (%d):\n\n", len(violations))
+					for _, v := range violations {
+						fmt.Printf("  ⚠ %s: %s\n", v.NodeID, v.Description)
+					}
+				} else {
+					fmt.Println("\nNo violations detected. ✓")
+				}
+			}
+			return nil
+		},
 	}
 }

@@ -14,6 +14,7 @@ local knowledge base for AI assistants.
 - [Schema Evolution](schema-evolution.md) — online ALTER (add fields/collections)
 - [Advanced MCP](advanced-mcp.md) — streaming, subscriptions, prompt templates
 - [Onboarding Mode](onboarding.md) — auto-generated project walkthroughs
+- [Federation](federation.md) — multi-repo intelligence, cross-repo queries
 
 ## Overview
 
