@@ -203,8 +203,6 @@ See [Advanced MCP documentation](docs/advanced-mcp.md) for details.
 
 | Document | Purpose |
 |----------|---------|
-| [PRD v3.1](PRDs/PRD_PCKE_v3_1.md) | Architecture & design decisions (what/why) |
-| [Execution Plan](PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md) | Implementation plan (how/when) |
 | [Architecture notes](docs/architecture.md) | Build tags, component map, operational notes |
 | [Documentation site](docs/index.md) | Getting started, API reference, query language, annotations |
 | [Contributing](CONTRIBUTING.md) | Dev workflow, conventions, CI gates |

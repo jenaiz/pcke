@@ -1,11 +1,7 @@
 # pcke — Architecture
 
-This document is a living companion to [PRD v3.1](../PRDs/PRD_PCKE_v3_1.md)
-and the [Execution Plan](../PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md).
-
-For the authoritative architecture, **always read the PRD first**. This file
-records implementation-time decisions, build-tag conventions, and
-operational notes that don't belong in the PRD itself.
+This document records implementation-time decisions, build-tag conventions,
+and operational notes for pcke.
 
 ---
 

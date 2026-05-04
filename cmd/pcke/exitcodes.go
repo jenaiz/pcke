@@ -1,6 +1,4 @@
 // Package main holds the exit-code mapping for pcke CLI errors.
-//
-// See PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md §10.2.
 package main
 
 // Exit codes for pcke CLI.

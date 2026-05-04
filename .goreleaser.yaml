@@ -1,9 +1,6 @@
-# goreleaser config — Phase −1 bootstrap.
-# See PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md §3.1 B8, §13.
+# goreleaser config.
 # Targets: darwin/linux × amd64/arm64.
-# Windows is built in CI as a smoke test (Plan §13.1) but NOT shipped here
-# until Phase 2. A separate validation track for Windows is filed as a TODO
-# in the README.
+# Windows is built in CI as a smoke test but NOT shipped here yet.
 #
 # Compatible with goreleaser v2.
 

@@ -1,5 +1,2 @@
-blank_issues_enabled: false
-contact_links:
-  - name: PRD & Execution Plan
-    url: https://github.com/jenaiz/pcke/blob/main/PRDs/PRD_PCKE_v3_1.md
-    about: Read the PRD and execution plan before opening design-level issues.
+blank_issues_enabled: true
+

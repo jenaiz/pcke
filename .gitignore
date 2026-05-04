@@ -48,3 +48,7 @@ benchstat.out
 # Local backup from initial bootstrap
 /pcke.local.bak/
 /pcke
+
+# Internal product docs (kept local)
+/PRDs/
+/.github/prompts/
