@@ -22,6 +22,17 @@ type ProactiveContext struct {
 	Constraints string `json:"constraints,omitempty"`
 	// History contains recent evolution history for the module.
 	History string `json:"history,omitempty"`
+	// Warnings contains proactive warnings for must-severity constraints.
+	Warnings []ProactiveWarning `json:"warnings,omitempty"`
+}
+
+// ProactiveWarning represents a must-severity constraint that should be
+// surfaced proactively to the agent.
+type ProactiveWarning struct {
+	Severity  string `json:"severity"`
+	Rule      string `json:"rule"`
+	Source    string `json:"source"`
+	AppliesTo string `json:"applies_to"`
 }
 
 // SuggestContext analyzes a tool query and returns proactive context if a
@@ -74,6 +85,18 @@ func (s *Server) SuggestContext(ctx context.Context, query string, enabled bool)
 		Module:      matched,
 		Constraints: output.RenderConstraints(filtered),
 		History:     output.RenderHistory(filtered),
+	}
+
+	// Inject warnings for must-severity constraints in the matched module.
+	for _, n := range filtered {
+		if n.Type == "rule" || n.Class == "constraint" {
+			pc.Warnings = append(pc.Warnings, ProactiveWarning{
+				Severity:  "must",
+				Rule:      n.Name,
+				Source:    n.Source,
+				AppliesTo: matched,
+			})
+		}
 	}
 
 	return pc, nil

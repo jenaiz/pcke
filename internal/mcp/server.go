@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jenaiz/pcke/internal/analysis"
+	pcontext "github.com/jenaiz/pcke/internal/context"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/output"
@@ -25,6 +26,7 @@ type Server struct {
 	resources []mcpserver.ServerResource
 	prompts   []mcpserver.ServerPrompt
 	broker    *Broker
+	session   *pcontext.Session
 }
 
 // New creates a [Server] backed by the given kdb database.
@@ -82,6 +84,14 @@ func (s *Server) ServerResources() []mcpserver.ServerResource {
 // ServerPrompts returns the registered MCP prompts for testing.
 func (s *Server) ServerPrompts() []mcpserver.ServerPrompt {
 	return s.prompts
+}
+
+// getSession returns the current session, creating one lazily if needed.
+func (s *Server) getSession() *pcontext.Session {
+	if s.session == nil {
+		s.session = pcontext.NewSession()
+	}
+	return s.session
 }
 
 // loadNodes reads all active knowledge nodes from the database.

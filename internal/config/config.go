@@ -19,10 +19,11 @@ import (
 
 // Config holds the merged configuration values.
 type Config struct {
-	Scan ScanConfig `toml:"scan"`
-	KDB  KDBConfig  `toml:"kdb"`
-	FTS  FTSConfig  `toml:"fts"`
-	MCP  MCPConfig  `toml:"mcp"`
+	Scan    ScanConfig    `toml:"scan"`
+	KDB     KDBConfig     `toml:"kdb"`
+	FTS     FTSConfig     `toml:"fts"`
+	MCP     MCPConfig     `toml:"mcp"`
+	Context ContextConfig `toml:"context"`
 }
 
 // ScanConfig holds scan-related settings.
@@ -56,6 +57,17 @@ type MCPConfig struct {
 	ChunkSize        int  `toml:"chunk_size"`
 }
 
+// ContextConfig holds contextual intelligence engine settings.
+type ContextConfig struct {
+	Budget            int     `toml:"budget"`
+	TokenMultiplier   float64 `toml:"token_multiplier"`
+	ProactiveWarnings bool    `toml:"proactive_warnings"`
+	WeightRecency     float64 `toml:"weight_recency"`
+	WeightSeverity    float64 `toml:"weight_severity"`
+	WeightProximity   float64 `toml:"weight_proximity"`
+	WeightNovelty     float64 `toml:"weight_novelty"`
+}
+
 // Defaults returns a Config populated with default values.
 // See PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md §9.2.
 func Defaults() Config {
@@ -79,6 +91,15 @@ func Defaults() Config {
 		},
 		MCP: MCPConfig{
 			ReadTimeoutS: 30,
+		},
+		Context: ContextConfig{
+			Budget:            2000,
+			TokenMultiplier:   1.3,
+			ProactiveWarnings: true,
+			WeightRecency:     0.25,
+			WeightSeverity:    0.35,
+			WeightProximity:   0.25,
+			WeightNovelty:     0.15,
 		},
 	}
 }

@@ -231,3 +231,24 @@ func lastSlash(s string) int {
 	}
 	return -1
 }
+
+func TestGitIntelChangedFiles(t *testing.T) {
+	root := findRepoRoot(t)
+
+	gi, err := NewGitIntel(root)
+	if err != nil {
+		t.Fatalf("NewGitIntel: %v", err)
+	}
+
+	// ChangedFiles should not error on the pcke repo itself.
+	files, err := gi.ChangedFiles()
+	if err != nil {
+		t.Fatalf("ChangedFiles: %v", err)
+	}
+	t.Logf("ChangedFiles: %d files", len(files))
+	// We can't assert specific files since it depends on branch state,
+	// but it should not panic and should return a valid slice.
+	if files == nil {
+		t.Log("no changed files (on main with clean tree)")
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jenaiz/pcke/internal/analysis"
+	pcontext "github.com/jenaiz/pcke/internal/context"
 	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/onboard"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -95,6 +96,32 @@ func (s *Server) registerTools() {
 			mcplib.Description("Direction: 'incoming', 'outgoing', or 'both' (default 'both')"),
 		),
 	), s.handleGetCrossRepoDeps)
+
+	// get_context_for_file — ranked, budgeted context for a specific file.
+	s.srv.AddTool(mcplib.NewTool("get_context_for_file",
+		mcplib.WithDescription("Get ranked, budgeted context relevant to a specific file: constraints, history, patterns, impact"),
+		mcplib.WithString("file_path",
+			mcplib.Required(),
+			mcplib.Description("Relative file path (e.g. 'internal/kdb/db.go')"),
+		),
+		mcplib.WithNumber("budget",
+			mcplib.Description("Maximum approximate token count (default 2000)"),
+		),
+		mcplib.WithString("focus",
+			mcplib.Description("Focus area: 'constraints', 'history', 'patterns', 'impact', or 'all' (default 'all')"),
+		),
+	), s.handleGetContextForFile)
+
+	// get_context_for_diff — ranked context for current change set.
+	s.srv.AddTool(mcplib.NewTool("get_context_for_diff",
+		mcplib.WithDescription("Get ranked context relevant to the current change set: constraints at risk, shared module impact, history"),
+		mcplib.WithString("changed_files",
+			mcplib.Description("Comma-separated file paths (if empty, auto-detects from git)"),
+		),
+		mcplib.WithNumber("budget",
+			mcplib.Description("Maximum approximate token count (default 3000)"),
+		),
+	), s.handleGetContextForDiff)
 }
 
 // handleRecall performs a text search over knowledge nodes.
@@ -607,4 +634,116 @@ func matchesDirection(d federation.CrossRepoDep, nodeID, direction string) bool 
 		}
 	}
 	return false
+}
+
+// handleGetContextForFile returns ranked, budgeted context for a file.
+func (s *Server) handleGetContextForFile(
+	ctx context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	filePath, err := request.RequireString("file_path")
+	if err != nil {
+		return mcplib.NewToolResultError("file_path parameter required"), nil
+	}
+
+	budget := 2000
+	if b := request.GetFloat("budget", 0); b > 0 {
+		budget = int(b)
+	}
+
+	focus := "all"
+	if f := request.GetString("focus", ""); f != "" {
+		focus = f
+	}
+
+	eng := pcontext.NewEngine(s.db, s.root, s.contextConfig())
+	eng.SetSession(s.getSession())
+
+	pkg, err := eng.Assemble(ctx, pcontext.Request{
+		FilePath: filePath,
+		Budget:   budget,
+		Focus:    focus,
+	})
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("assemble context: %v", err)), nil
+	}
+
+	return mcplib.NewToolResultText(formatContextPackage(pkg)), nil
+}
+
+// handleGetContextForDiff returns ranked context for the current change set.
+func (s *Server) handleGetContextForDiff(
+	ctx context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	budget := 3000
+	if b := request.GetFloat("budget", 0); b > 0 {
+		budget = int(b)
+	}
+
+	var changedFiles []string
+	if cf := request.GetString("changed_files", ""); cf != "" {
+		for _, f := range strings.Split(cf, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" {
+				changedFiles = append(changedFiles, f)
+			}
+		}
+	}
+
+	// Auto-detect from git if not provided.
+	if len(changedFiles) == 0 && s.root != "" {
+		gi, err := analysis.NewGitIntel(s.root)
+		if err == nil {
+			if files, err := gi.ChangedFiles(); err == nil {
+				changedFiles = files
+			}
+		}
+	}
+
+	if len(changedFiles) == 0 {
+		return mcplib.NewToolResultText("No changed files detected."), nil
+	}
+
+	eng := pcontext.NewEngine(s.db, s.root, s.contextConfig())
+	eng.SetSession(s.getSession())
+
+	pkg, err := eng.Assemble(ctx, pcontext.Request{
+		ChangedFiles: changedFiles,
+		Budget:       budget,
+	})
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("assemble context: %v", err)), nil
+	}
+
+	return mcplib.NewToolResultText(formatContextPackage(pkg)), nil
+}
+
+// contextConfig returns the context engine config from server settings.
+func (s *Server) contextConfig() pcontext.Config {
+	return pcontext.DefaultConfig()
+}
+
+// formatContextPackage renders a Package as Markdown for tool output.
+func formatContextPackage(pkg *pcontext.Package) string {
+	var b strings.Builder
+
+	// Warnings first (always shown).
+	if len(pkg.Warnings) > 0 {
+		b.WriteString("## ⚠️ Warnings\n\n")
+		for _, w := range pkg.Warnings {
+			fmt.Fprintf(&b, "- **[%s]** %s (%s: %s)\n", w.Severity, w.Rule, w.Source, w.AppliesTo)
+		}
+		b.WriteString("\n")
+	}
+
+	// Sections by type.
+	for _, s := range pkg.Sections {
+		fmt.Fprintf(&b, "### %s\n\n", s.Title)
+		b.WriteString(s.Content)
+		b.WriteString("\n\n")
+	}
+
+	fmt.Fprintf(&b, "---\n*Tokens used: ~%d*\n", pkg.TokensUsed)
+	return b.String()
 }

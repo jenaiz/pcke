@@ -6,6 +6,10 @@
 
 Languages: Go (3 files), Markdown (1 files)
 
+## Conventions (SHOULD follow)
+
+- Test files colocated with source (_test.go pattern)
+
 ## Modules
 
 - `cmd` (1 files)

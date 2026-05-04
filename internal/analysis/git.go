@@ -279,3 +279,99 @@ func (g *GitIntel) DetectRenames(sinceHash string) ([]RenameEntry, error) {
 
 // errStopIter is a sentinel error to stop commit iteration early.
 var errStopIter = fmt.Errorf("stop iteration")
+
+// ChangedFiles returns files changed on the current branch vs base (main/master).
+// Falls back to uncommitted changes if already on main/master.
+func (g *GitIntel) ChangedFiles() ([]string, error) {
+	branch := g.CurrentBranch()
+
+	// If on main/master or detached, return uncommitted changes.
+	if branch == "" || branch == "main" || branch == "master" {
+		return g.uncommittedFiles()
+	}
+
+	return g.branchChangedFiles()
+}
+
+// branchChangedFiles returns files changed on the current branch vs base.
+func (g *GitIntel) branchChangedFiles() ([]string, error) {
+	baseRef, err := g.resolveBase()
+	if err != nil {
+		return g.uncommittedFiles()
+	}
+
+	headRef, err := g.repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("resolve HEAD: %w", err)
+	}
+
+	baseCommit, err := g.repo.CommitObject(baseRef.Hash())
+	if err != nil {
+		return g.uncommittedFiles()
+	}
+
+	headCommit, err := g.repo.CommitObject(headRef.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("resolve HEAD commit: %w", err)
+	}
+
+	baseTree, err := baseCommit.Tree()
+	if err != nil {
+		return g.uncommittedFiles()
+	}
+
+	headTree, err := headCommit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("resolve HEAD tree: %w", err)
+	}
+
+	changes, err := baseTree.Diff(headTree)
+	if err != nil {
+		return g.uncommittedFiles()
+	}
+
+	files := make(map[string]bool)
+	for _, change := range changes {
+		if change.From.Name != "" {
+			files[change.From.Name] = true
+		}
+		if change.To.Name != "" {
+			files[change.To.Name] = true
+		}
+	}
+
+	result := make([]string, 0, len(files))
+	for f := range files {
+		result = append(result, f)
+	}
+	return result, nil
+}
+
+// resolveBase finds the reference for main or master branch.
+func (g *GitIntel) resolveBase() (*plumbing.Reference, error) {
+	ref, err := g.repo.Reference(plumbing.NewBranchReferenceName("main"), true)
+	if err == nil {
+		return ref, nil
+	}
+	return g.repo.Reference(plumbing.NewBranchReferenceName("master"), true)
+}
+
+// uncommittedFiles returns files with uncommitted changes (staged + unstaged).
+func (g *GitIntel) uncommittedFiles() ([]string, error) {
+	wt, err := g.repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("worktree: %w", err)
+	}
+	status, err := wt.Status()
+	if err != nil {
+		return nil, fmt.Errorf("worktree status: %w", err)
+	}
+
+	var files []string
+	for path, s := range status {
+		if s.Staging != git.Unmodified || s.Worktree != git.Unmodified {
+			files = append(files, path)
+		}
+	}
+	return files, nil
+}
