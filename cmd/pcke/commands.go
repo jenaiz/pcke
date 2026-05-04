@@ -18,6 +18,7 @@ import (
 
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/config"
+	//nolint:staticcheck // SA1019: federation is intentionally retained while frozen; CLI surface is the legitimate caller (PRD v5.2 §2).
 	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/index/fts"
@@ -2253,8 +2254,11 @@ func newFederationCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "federation",
-		Short: "Manage multi-repo federation",
+		Short: "Manage multi-repo federation (DEPRECATED)",
 		Long: `Manage the pcke multi-repo federation.
+
+DEPRECATED: federation is frozen and receives no new features. It will not be
+ported to the v1.0 graph model. See ADR-0008 §4.1 and PRD v5.2 for the rationale.
 
 Federate knowledge bases from multiple repositories into a unified view.
 Enable cross-repo queries, dependency detection, and shared constraints.
@@ -2265,6 +2269,9 @@ Examples:
   pcke federation query "FROM nodes WHERE module = \"internal/kdb\""
   pcke federation deps --module=internal/kdb
   pcke federation constraints`,
+		PersistentPreRun: func(_ *cobra.Command, _ []string) {
+			fmt.Fprintln(os.Stderr, "warning: pcke federation is deprecated and will not be ported to the v1.0 graph model (ADR-0008 §4.1).")
+		},
 	}
 
 	cmd.PersistentFlags().StringVar(&format, "format", "text", "Output format: text or json")

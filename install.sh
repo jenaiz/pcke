@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -sSfL https://raw.githubusercontent.com/jenaiz/pcke/main/install.sh | sh
-#   VERSION=v1.2.1 curl -sSfL .../install.sh | sh
+#   VERSION=v0.9.0 curl -sSfL .../install.sh | sh
 #   INSTALL_DIR=/usr/local/bin curl -sSfL .../install.sh | sh
 #
 # Environment variables:

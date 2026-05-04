@@ -61,7 +61,9 @@ stats, err := db.Stats()
 
 ## Frozen API
 
-The following interfaces are frozen as of v1.0. Changes require an ADR:
+The following interfaces were frozen as of v0.4 (originally tagged v1.0;
+see ADR-0008 for the version reset). The v1.0 stability commitment now
+applies to PRD v5.2's `v1.0.0`. Changes require an ADR:
 
 - `kdb.Open(path string, opts *Options) (*DB, error)`
 - `(*DB).Close() error`

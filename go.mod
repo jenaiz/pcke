@@ -38,3 +38,22 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
+
+// Pre-pivot tags retracted per ADR-0008 (amended by ADR-0009) and PRD v5.2 §2.4.
+// The old releases remain in git history; tooling should treat these versions as
+// withdrawn. Use the v0.4.0..v0.9.0 tags published at the same commits instead.
+//
+// Note: v2.0.0 cannot be retracted here because the module path
+// github.com/jenaiz/pcke (no /v2 suffix) is not valid at major version 2 — Go
+// rejects retracts for versions outside the module's major-version range. The
+// v2.0.0 tag was already unreachable via `go install`; release notes for v0.9.1
+// document its supersession by v0.9.0.
+retract (
+	v1.0.0 // Pre-pivot. Use v0.4.0.
+	v1.1.0 // Pre-pivot. Use v0.5.0.
+	v1.1.1 // Pre-pivot. Use v0.5.1.
+	v1.2.0 // Pre-pivot. Use v0.6.0.
+	v1.2.1 // Pre-pivot. Use v0.6.1.
+	v1.3.0 // Pre-pivot. Use v0.7.0.
+	v1.4.0 // Pre-pivot. Use v0.8.0.
+)

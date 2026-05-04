@@ -1,6 +1,11 @@
 // Package federation implements multi-repo intelligence for pcke.
 // It provides a read-time overlay that federates knowledge bases from
 // multiple repositories without centralizing data.
+//
+// Deprecated: federation is frozen as of v0.9.1 (PRD v5.2, ADR-0008 §4.1).
+// The package remains in the binary for backward compatibility but receives
+// no new features and will not be ported to the v1.0 graph model. Removal
+// after v1.0.0 is contingent on adoption signals.
 package federation
 
 import (

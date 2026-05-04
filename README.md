@@ -1,17 +1,39 @@
 # pcke — Project Context & Knowledge Engine
 
-> **Status: v1.2** (CLI Track complete)
+> **Status: v0.9.1 — pre-1.0 pivot in progress.** The pivot is ratified by
+> [ADR-0008](docs/adr/0008-context-graph-pivot.md) (amended by
+> [ADR-0009](docs/adr/0009-durable-memory-corrections.md)). The first stable
+> release is `v1.0.0` after Phase 15.
 
-**pcke** is a Long-Term Engineering Memory — a local system that extracts
-knowledge from codebases and serves it to AI coding agents (GitHub Copilot,
-Claude Code) so they can operate with the context of a Senior Engineer who has
-years of project history.
+**pcke gives every repo a durable, queryable memory.** Decisions, code
+structure, change history, and agent interactions are stored as typed,
+versioned events in a local graph the developer owns. Retrieval is by
+traversal, grounded by provenance — not vector similarity, not LLM-summarized
+fragments.
 
-- **Zero token cost.** pcke never calls an LLM.
-- **Single binary, zero dependencies.** No Docker, no cloud, no API keys.
+- **Local, deterministic core.** Default builds compute the graph from code,
+  git, and annotations. No LLM, no network, no API keys.
+- **Single binary.** No Docker, no cloud.
 - **Custom storage engine (`kdb`).** B+tree, WAL, inverted index, query
   language — built from scratch.
-- **MCP server.** Exposes project knowledge to AI agents via the Model Context Protocol.
+- **MCP server.** Exposes the graph to AI coding agents (GitHub Copilot,
+  Claude Code) over the Model Context Protocol.
+- **Optional vector re-ranker** (post-Phase 13, opt-in via `-tags=rerank`).
+  Operates only over a subgraph already extracted by traversal — never as
+  primary retrieval.
+
+## Pre-pivot version note
+
+Tags `v1.0.0` through `v2.0.0` predate the v1.0 stability commitment. They
+are superseded by parallel `v0.4.0`–`v0.9.0` tags pointing at the same commits
+and are marked withdrawn via `retract` in `go.mod`. Old tags remain in git
+history; binary releases under the old names are retained but flagged as
+superseded. New consumers should pin to `v0.9.0` (or `@latest` once Phase 12
+ships).
+
+`v2.0.0` cannot be retracted in `go.mod` because the module path lacks a
+`/v2` suffix; it was already unreachable via `go install`. Binary/Homebrew
+users on `v2.0.0` should switch to `v0.9.0`.
 
 ## Installation
 
@@ -36,7 +58,7 @@ curl -sSfL https://raw.githubusercontent.com/jenaiz/pcke/main/install.sh | sh
 To install a specific version:
 
 ```bash
-VERSION=v1.2.1 curl -sSfL https://raw.githubusercontent.com/jenaiz/pcke/main/install.sh | sh
+VERSION=v0.9.0 curl -sSfL https://raw.githubusercontent.com/jenaiz/pcke/main/install.sh | sh
 ```
 
 ### Container
@@ -47,7 +69,8 @@ docker run --rm -v "$PWD:/project" -w /project ghcr.io/jenaiz/pcke scan
 
 ### Binary download
 
-Download the appropriate archive from [GitHub Releases](https://github.com/jenaiz/pcke/releases):
+Download the appropriate archive from
+[GitHub Releases](https://github.com/jenaiz/pcke/releases):
 
 | Platform | Archive |
 |----------|---------|
@@ -68,7 +91,8 @@ make install
 
 ### Verify with cosign
 
-All release checksums are signed with [cosign](https://github.com/sigstore/cosign) keyless (OIDC):
+All release checksums are signed with [cosign](https://github.com/sigstore/cosign)
+keyless (OIDC):
 
 ```bash
 cosign verify-blob \
@@ -109,11 +133,9 @@ pcke compact
 pcke serve
 ```
 
-Requirements: **Go 1.25+** (only for building from source), a **C compiler** (for tree-sitter / CGo deep scans), [golangci-lint](https://golangci-lint.run/) v2 (for development).
-
-> **Note:** `pcke` uses [go-git](https://github.com/go-git/go-git) for Git
-> history analysis and [go-tree-sitter](https://github.com/smacker/go-tree-sitter)
-> for AST extraction (pulled automatically by `go mod tidy`).
+Requirements: **Go 1.25+** (only for building from source), a **C compiler**
+(for tree-sitter / CGo deep scans), [golangci-lint](https://golangci-lint.run/)
+v2 (for development).
 
 ## Using pcke with AI agents (MCP)
 
@@ -158,7 +180,7 @@ cd /path/to/your-project
 }
 ```
 
-### Available MCP tools
+### Available MCP tools (today, v0.9.x)
 
 | Tool | Description |
 |------|-------------|
@@ -175,51 +197,47 @@ cd /path/to/your-project
 | `pcke://constraints` | Rendered constraints and conventions |
 | `pcke://decisions` | Rendered design decisions and ADRs |
 
-### Advanced MCP Features (v1.1)
+### Coming in v0.10–v0.13
 
-pcke v1.1 introduces advanced MCP capabilities for richer AI agent integration:
-
-- **Streaming responses.** Large query results are delivered progressively,
-  so agents can start processing before the full result set is ready.
-- **Subscriptions.** Agents can subscribe to knowledge base changes and
-  receive real-time notifications when `pcke scan` completes or rules are
-  updated.
-- **Prompt templates.** Pre-built context packages (`onboarding`, `review`,
-  `debug`, `refactor`) that combine architecture, conventions, and decisions
-  into a single prompt-ready payload.
-- **Proactive context.** (opt-in) pcke can suggest relevant constraints and
-  history when an agent queries a module, without being explicitly asked.
-
-Enable advanced features in `.pcke/config.toml`:
-
-```toml
-[mcp]
-proactive_context = true
-```
-
-See [Advanced MCP documentation](docs/advanced-mcp.md) for details.
+| Phase | Adds |
+|-------|------|
+| 12 — Memory Schema + Graph | Typed-event log (Entity / Decision / Observation / Outcome), graph traversal primitives, `TRAVERSE` and `AS OF` DSL, decision backfill from ADRs and `@pcke-rule` annotations |
+| 13 — Subgraph Retrieval | `get_context_for_file`, `get_context_for_diff`, topology-aware sync, optional `-tags=rerank` vector re-ranker over subgraphs |
+| 14 — Durable Sessions | Persistent agent sessions, `pcke sessions`, `pcke stats` (raw counts) |
+| 15 — Workflow Awareness | `set_workflow` MCP tool, recipes, anticipatory context |
 
 ## Documentation
 
 | Document | Purpose |
 |----------|---------|
+| [Architecture Decision Records](docs/adr/) | All ADRs, including [0008 (pivot)](docs/adr/0008-context-graph-pivot.md) and [0009 (corrections)](docs/adr/0009-durable-memory-corrections.md) |
 | [Architecture notes](docs/architecture.md) | Build tags, component map, operational notes |
 | [Documentation site](docs/index.md) | Getting started, API reference, query language, annotations |
-| [Contributing](CONTRIBUTING.md) | Dev workflow, conventions, CI gates |
+| [Contributing](CONTRIBUTING.md) | Dev workflow, conventions, frozen/parked work |
 
-## Project phases
+## Project phases (roadmap to v1.0.0)
 
-| Phase | Goal | Status |
-|-------|------|--------|
-| −1 | Bootstrap (CI, lint, release pipeline) | **complete** |
-| 0 | Storage engine + CLI scan/sync | **complete** |
-| 1 | Search & checkpointing | **complete** |
-| 2 | Deep analysis & MCP | **complete** |
-| 3 | Query language & polish | **complete** |
-| 4 | v1.0 | **complete** |
-| 5 | Advanced MCP (v1.1) | **complete** |
+| Version | Phase | Name | Status |
+|---------|-------|------|--------|
+| v0.0.x – v0.3.x | -1 to 3 | Bootstrap → MCP → Query | DONE (pre-pivot) |
+| v0.4.0 | 4 | v1 release (was `v1.0.0`) | DONE (retag) |
+| v0.5.x | 5 | Advanced MCP | DONE (retag) |
+| v0.6.x | CLI/Dist | DX & distribution | DONE (retag) |
+| v0.7.0 | 6 | Onboarding | DONE (retag) |
+| v0.8.0 | 7 | Schema Evolution | DONE (retag) |
+| v0.9.0 | 8 | Federation (**deprecated**) | DONE (retag) |
+| **v0.9.1** | 11 | **Pivot Reset** | **CURRENT** |
+| v0.10.0 | 12 | Memory Schema + Graph | next |
+| v0.11.0 | 13 | Subgraph Retrieval | planned |
+| v0.12.0 | 14 | Durable Sessions | planned |
+| v0.13.0 | 15 | Workflow Awareness | planned |
+| **v1.0.0** | — | **Stable release: Durable Code Memory** | target |
 
-## What's implemented
+Phases 9 (Local Embeddings as bundled feature) and 10 (IDE Extensions) remain
+post-1.0; embeddings will land as an opt-in `-tags=rerank` re-ranker per
+[ADR-0009 §2](docs/adr/0009-durable-memory-corrections.md).
+
+## What's implemented today (v0.9.x)
 
 ### Storage engine (`internal/kdb`)
 
@@ -241,70 +259,42 @@ A crash-safe embedded key-value store built from scratch:
 
 ### Full-Text Search (`internal/kdb/index/fts`)
 
-pcke includes a built-in full-text search engine optimized for code knowledge:
-
 - **BM25 ranking** — relevance scoring tuned for engineering documentation.
 - **Code-aware tokenizer** — splits camelCase, snake_case, and CJK text correctly.
 - **Inverted index** — tiered segments with delta-encoded posting compression.
 - **Tombstones** — deleted documents are excluded from queries and cleaned up on merge.
-- **Recall command** — `pcke recall "how does authentication work"` returns ranked results.
-
-#### Quick example
-
-```bash
-pcke scan --deep
-pcke recall "error handling strategy"
-```
 
 ### Deep analysis (`internal/analysis`)
 
 - **tree-sitter AST extraction** — parses Go source files to extract functions, types, interfaces, and structs as knowledge entities.
 - **Relations populator** — automatically discovers import relationships between modules.
 - **Git history analysis** — extracts commit history, branch detection, and rename tracking.
-- **Secrets detection** — scans for accidentally committed credentials (AWS keys, tokens, etc.).
+- **Secrets detection** — scans for accidentally committed credentials.
 
 ### MCP server (`internal/mcp`)
 
-- **4 tools** — `recall`, `get_module_context`, `get_constraints`, `get_history`.
-- **3 resources** — `pcke://architecture`, `pcke://constraints`, `pcke://decisions`.
+- **4 tools**, **3 resources** (see table above).
 - **stdio transport** — compatible with VS Code, Claude Code, and any MCP client.
+- **Streaming, subscriptions, prompt templates** added in v0.5 (was v1.1).
+
+### Federation (`internal/federation`) — **deprecated**
+
+Multi-repo intelligence shipped in v0.9.0 (was v2.0.0). It is frozen as of
+v0.9.1 and receives no new features. See [ADR-0008 §4.1](docs/adr/0008-context-graph-pivot.md)
+for rationale. Removal after v1.0.0 is contingent on adoption signals.
 
 ### CLI (`cmd/pcke`)
 
-Cobra-based CLI with 22+ commands:
-
-| Command | Description |
-|---------|-------------|
-| `pcke init` | Initialize pcke in the current repository |
-| `pcke scan` | Scan the repository and update the knowledge base |
-| `pcke scan --deep` | Deep scan with AST extraction (requires CGo) |
-| `pcke sync` | Generate output files (.context/, copilot-instructions, etc.) |
-| `pcke recall` | Full-text search with BM25 scoring |
-| `pcke query` | Query the knowledge base using the pcke DSL |
-| `pcke explain` | Show execution plan for a query |
-| `pcke export` | Export query results as JSON or YAML |
-| `pcke shell` | Interactive query REPL |
-| `pcke watch` | Watch for file changes and auto-scan |
-| `pcke serve` | Start MCP server on stdio |
-| `pcke note add/list/remove` | Manage project notes |
-| `pcke rule add/list/remove` | Manage project rules |
-| `pcke relations list/graph` | Explore module dependencies |
-| `pcke schema` | Inspect the knowledge base schema |
-| `pcke modules` | List detected modules |
-| `pcke status` | Show knowledge base status |
-| `pcke diagnostics` | Show database diagnostics |
-| `pcke compact` | Compact the database to reclaim space |
-| `pcke migrate` | Run schema migrations |
-| `pcke config get/set/list` | View and manage configuration |
-| `pcke clean` | Remove the knowledge base |
+Cobra-based CLI with 22+ commands (`pcke init`, `scan`, `sync`, `recall`,
+`query`, `serve`, `note`, `rule`, `relations`, `schema`, `migrate`,
+`compact`, `shell`, `watch`, `onboard`, `federation`, `status`, `diagnostics`,
+`config`, `clean`, `export`, `explain`, `modules`).
 
 ### Configuration (`internal/config`)
 
 Layered TOML config: CLI flags > environment > repo-level > user-level > defaults.
 
 ### Performance
-
-pcke is designed for fast, low-overhead operation on real-world codebases:
 
 | Metric | Target | Verified |
 |--------|--------|----------|
@@ -315,19 +305,8 @@ pcke is designed for fast, low-overhead operation on real-world codebases:
 | Memory peak (full scan, 10K files) | < 200 MB | ✓ |
 | Buffer pool hit rate (steady-state) | > 90% | ✓ |
 
-Benchmarks run on every commit via `BenchmarkCritical*` with a 10% regression gate.
-
-### Schema Migrations
-
-When pcke's internal storage format changes between versions, the `migrate`
-command handles the upgrade:
-
-```bash
-pcke migrate
-```
-
-Migrations are versioned, chunked (safe for large databases), and idempotent
-(running twice has the same effect as running once).
+Benchmarks run on every commit via `BenchmarkCritical*` with a 10% regression
+gate.
 
 ## License
 

@@ -1,6 +1,7 @@
 # Advanced MCP Features
 
-pcke v1.1 extends the MCP (Model Context Protocol) server with streaming,
+pcke v0.5 (originally tagged v1.1; see ADR-0008 for the version reset)
+extends the MCP (Model Context Protocol) server with streaming,
 subscriptions, prompt templates, and proactive context suggestions.
 
 ## Starting the Server
@@ -179,8 +180,8 @@ Or via environment variable:
 export PCKE_MCP_PROACTIVE_CONTEXT=true
 ```
 
-When disabled, tool responses are identical to v1.0 — no extra fields are
-added.
+When disabled, tool responses are identical to v0.4 (pre-pivot v1.0) — no
+extra fields are added.
 
 ---
 

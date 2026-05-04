@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jenaiz/pcke/internal/analysis"
+	//nolint:staticcheck // SA1019: federation is intentionally retained while frozen; MCP surface keeps the existing tools wired (PRD v5.2 §2).
 	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/onboard"
 	mcplib "github.com/mark3labs/mcp-go/mcp"

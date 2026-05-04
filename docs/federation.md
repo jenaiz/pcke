@@ -1,5 +1,12 @@
 # Federation — Multi-Repo Intelligence
 
+> **DEPRECATED as of v0.9.1.** Federation is frozen and receives no new
+> features. It will not be ported to the v1.0 graph model. See
+> [ADR-0008 §4.1](adr/0008-context-graph-pivot.md) for rationale. The package
+> remains in the binary for backward compatibility; removal after v1.0.0 is
+> contingent on adoption signals. Running any `pcke federation *` command
+> emits a one-line deprecation warning to stderr.
+
 pcke supports federating knowledge bases from multiple repositories into a unified view. Each repository keeps its own `.pcke/` database — federation is a **read-time overlay** with no shared store.
 
 ## Setup
