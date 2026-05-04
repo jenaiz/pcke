@@ -32,13 +32,39 @@ var collectionPrefixes = map[string]string{
 	"relations":   "rel:",
 }
 
+// RegisterCollectionPrefix adds a key prefix for a new collection. If the
+// collection already has the same prefix, it is a no-op (idempotent).
+func RegisterCollectionPrefix(collection, prefix string) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if existing, ok := collectionPrefixes[collection]; ok {
+		if existing == prefix {
+			return nil
+		}
+		return fmt.Errorf("query: collection %q already has prefix %q", collection, existing)
+	}
+
+	collectionPrefixes[collection] = prefix
+	return nil
+}
+
+// CollectionPrefix returns the kdb key prefix for a collection, or empty if unknown.
+func CollectionPrefix(collection string) string {
+	mu.RLock()
+	defer mu.RUnlock()
+	return collectionPrefixes[collection]
+}
+
 // Execute runs a query plan against the database and returns matching rows.
 // The plan must have been produced by BuildPlan on a type-checked query.
 //
 // The executor uses cursor-based prefix scanning within a snapshot-isolated
 // View transaction, applying filters, sorting, and LIMIT post-scan.
 func Execute(ctx context.Context, db *kdb.DB, plan *Plan) (*ResultSet, error) {
+	mu.RLock()
 	prefix, ok := collectionPrefixes[plan.Collection]
+	mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("query: execute: unknown collection %q", plan.Collection)
 	}

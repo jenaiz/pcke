@@ -1147,6 +1147,8 @@ Examples:
 		},
 	})
 
+	cmd.AddCommand(newAlterCmd())
+
 	return cmd
 }
 
@@ -2006,4 +2008,239 @@ func loadEvolutionLogsFromDB(ctx context.Context, db *kdb.DB) ([]analysis.Evolut
 		return nil, err
 	}
 	return logs, nil
+}
+
+// ── ALTER subcommand ──────────────────────────────────────────────────
+
+func newAlterCmd() *cobra.Command {
+	var (
+		addField      string
+		addCollection string
+		fields        string
+		defaultVal    string
+		indexed       bool
+		dryRun        bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "alter",
+		Short: "Online schema evolution: add fields or collections",
+		Long: `Apply additive schema changes without requiring offline migrations.
+
+  Supported operations:
+    --add-field <collection>.<field>:<type>    Add a field to an existing collection
+    --add-collection <name> --fields f1:t1,f2:t2,...  Add a new collection
+
+  Types: string, number, int, float, bool, time, []string
+
+  Examples:
+    pcke schema alter --add-field nodes.priority:number
+    pcke schema alter --add-field nodes.priority:number --default=0 --indexed
+    pcke schema alter --add-field nodes.priority:number --dry-run
+    pcke schema alter --add-collection metrics --fields id:string,value:number`,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if addField == "" && addCollection == "" {
+				return fmt.Errorf("specify --add-field or --add-collection")
+			}
+			if addField != "" && addCollection != "" {
+				return fmt.Errorf("specify only one of --add-field or --add-collection")
+			}
+
+			if addField != "" {
+				return runAlterAddField(addField, defaultVal, indexed, dryRun)
+			}
+			return runAlterAddCollection(addCollection, fields, dryRun)
+		},
+	}
+
+	cmd.Flags().StringVar(&addField, "add-field", "", "Add field: collection.field:type")
+	cmd.Flags().StringVar(&addCollection, "add-collection", "", "Add a new collection")
+	cmd.Flags().StringVar(&fields, "fields", "", "Fields for new collection: f1:t1,f2:t2,...")
+	cmd.Flags().StringVar(&defaultVal, "default", "", "Default value for new field")
+	cmd.Flags().BoolVar(&indexed, "indexed", false, "Create index for new field")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show impact without mutating")
+
+	return cmd
+}
+
+func runAlterAddField(spec, defaultVal string, indexed, dryRun bool) error {
+	// Parse "collection.field:type".
+	dotIdx := strings.IndexByte(spec, '.')
+	if dotIdx < 0 {
+		return fmt.Errorf("invalid --add-field format: expected collection.field:type, got %q", spec)
+	}
+	collection := spec[:dotIdx]
+	rest := spec[dotIdx+1:]
+
+	colonIdx := strings.IndexByte(rest, ':')
+	if colonIdx < 0 {
+		return fmt.Errorf("invalid --add-field format: expected collection.field:type, got %q", spec)
+	}
+	field := rest[:colonIdx]
+	typeName := rest[colonIdx+1:]
+
+	ft, err := query.ParseFieldType(typeName)
+	if err != nil {
+		return err
+	}
+
+	op := &migrate.AlterOp{
+		Type:       migrate.AddField,
+		Collection: collection,
+		Field:      field,
+		FieldType:  ft,
+		Indexed:    indexed,
+	}
+
+	if defaultVal != "" {
+		op.Default = parseDefault(defaultVal, ft)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("alter: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("alter: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if dryRun {
+		report, err := migrate.AnalyzeImpact(context.Background(), db, op)
+		if err != nil {
+			return fmt.Errorf("alter: dry-run: %w", err)
+		}
+		printImpactReport(report, op)
+		return nil
+	}
+
+	if err := migrate.Apply(context.Background(), db, op); err != nil {
+		return fmt.Errorf("alter: %w", err)
+	}
+	fmt.Printf("ALTER ADD FIELD %s.%s:%s applied (schema version → %d)\n",
+		collection, field, typeName, db.SchemaVersion())
+
+	// Run backfill if there are records.
+	count, err := migrate.Backfill(context.Background(), db, op, 500)
+	if err != nil {
+		return fmt.Errorf("alter: backfill: %w", err)
+	}
+	if count > 0 {
+		fmt.Printf("Backfilled %d records\n", count)
+	}
+
+	return nil
+}
+
+func runAlterAddCollection(name, fieldsSpec string, dryRun bool) error {
+	if fieldsSpec == "" {
+		return fmt.Errorf("--fields required for --add-collection")
+	}
+
+	schema, err := parseFieldsSpec(fieldsSpec)
+	if err != nil {
+		return err
+	}
+
+	// Generate prefix from first 2 chars + ":"
+	prefix := name
+	if len(prefix) > 3 {
+		prefix = prefix[:3]
+	}
+	prefix += ":"
+
+	op := &migrate.AlterOp{
+		Type:       migrate.AddCollection,
+		Collection: name,
+		Fields:     schema,
+		Prefix:     prefix,
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("alter: get working directory: %w", err)
+	}
+
+	db, err := kdb.Open(cwd, nil)
+	if err != nil {
+		return fmt.Errorf("alter: open database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if dryRun {
+		report, err := migrate.AnalyzeImpact(context.Background(), db, op)
+		if err != nil {
+			return fmt.Errorf("alter: dry-run: %w", err)
+		}
+		printImpactReport(report, op)
+		return nil
+	}
+
+	if err := migrate.Apply(context.Background(), db, op); err != nil {
+		return fmt.Errorf("alter: %w", err)
+	}
+	fmt.Printf("ALTER ADD COLLECTION %s applied (schema version → %d)\n",
+		name, db.SchemaVersion())
+
+	return nil
+}
+
+func parseFieldsSpec(spec string) (query.Schema, error) {
+	schema := make(query.Schema)
+	parts := strings.Split(spec, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		colonIdx := strings.IndexByte(p, ':')
+		if colonIdx < 0 {
+			return nil, fmt.Errorf("invalid field spec %q: expected field:type", p)
+		}
+		field := p[:colonIdx]
+		typeName := p[colonIdx+1:]
+		ft, err := query.ParseFieldType(typeName)
+		if err != nil {
+			return nil, err
+		}
+		schema[field] = ft
+	}
+	if len(schema) == 0 {
+		return nil, fmt.Errorf("no fields specified")
+	}
+	return schema, nil
+}
+
+func parseDefault(val string, ft query.FieldType) any {
+	switch ft {
+	case query.FieldNumber:
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f
+		}
+		return float64(0)
+	case query.FieldBool:
+		return val == "true" || val == "1"
+	default:
+		return val
+	}
+}
+
+func printImpactReport(report *migrate.ImpactReport, op *migrate.AlterOp) {
+	fmt.Printf("=== Dry-Run Impact Report ===\n")
+	fmt.Printf("Operation:         %s\n", op.Type)
+	fmt.Printf("Collection:        %s\n", op.Collection)
+	if op.Field != "" {
+		fmt.Printf("Field:             %s (%s)\n", op.Field, op.FieldType)
+	}
+	fmt.Printf("Schema version:    %d → %d\n", report.SchemaVersionFrom, report.SchemaVersionTo)
+	fmt.Printf("Affected records:  %d\n", report.AffectedRecords)
+	fmt.Printf("Est. backfill:     %s\n", report.EstimatedBackfill)
+	if len(report.IndexRebuildScope) > 0 {
+		fmt.Printf("Index rebuild:     %s\n", strings.Join(report.IndexRebuildScope, ", "))
+	}
+	if report.IsIdempotent {
+		fmt.Printf("Status:            IDEMPOTENT (already applied)\n")
+	}
 }
