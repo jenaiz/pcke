@@ -27,6 +27,13 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("kdb.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	// Pre-grow so tests writing dozens of links don't exhaust the freelist
+	// under kdb's CoW page allocation. 10 chunks ≈ 640 KB headroom.
+	for range 10 {
+		if err := db.Grow(); err != nil {
+			t.Fatalf("db.Grow: %v", err)
+		}
+	}
 	return &fixture{db: db, store: event.New(db)}
 }
 
