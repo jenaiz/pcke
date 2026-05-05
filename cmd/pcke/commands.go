@@ -1199,15 +1199,9 @@ Migrations are versioned, chunked (safe for large databases), and idempotent
 // registerMigrations adds all known schema migrations to the engine.
 // New migrations should be appended here as pcke evolves.
 func registerMigrations(e *migrate.Engine) {
-	// No migrations yet — the initial schema (version 0) is the baseline.
-	// Future migrations will be registered here:
-	//
-	// e.Register(migrate.Migration{
-	//     Version:     1,
-	//     Description: "add foo index",
-	//     Migrate:     migrateV1AddFooIndex,
-	// })
-	_ = e
+	// v10 — F12.T1 typed-event log baseline. Schema-version bump only;
+	// data translation lands in F12.T6 as migrations 0011–0014.
+	e.Register(migrate.V0010EventBaseline())
 }
 
 // configGet returns the value of a dotted config key (e.g. "scan.redact_secrets").
