@@ -200,16 +200,15 @@ func TestReverseLinkKey_RoundTrip(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		dst, edge, src string
-		ver            uint64
 	}{
-		{"e:foo.go", "imports", "e:bar.go", 1},
-		{"e:weird:path.go", "decision_link", "d:adr-0008", 7},
-		{"e:αβγ", "linked_module", "e:δεζ", 999},
+		{"e:foo.go", "imports", "e:bar.go"},
+		{"e:weird:path.go", "decision_link", "d:adr-0008"},
+		{"e:αβγ", "linked_module", "e:δεζ"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.dst+"->"+tc.src, func(t *testing.T) {
 			t.Parallel()
-			key, err := BuildReverseLinkKey(tc.dst, tc.edge, tc.src, tc.ver)
+			key, err := BuildReverseLinkKey(tc.dst, tc.edge, tc.src)
 			if err != nil {
 				t.Fatalf("BuildReverseLinkKey: %v", err)
 			}
@@ -217,10 +216,9 @@ func TestReverseLinkKey_RoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseReverseLinkKey(%q): %v", key, err)
 			}
-			if parsed.DstRef != tc.dst || parsed.EdgeType != tc.edge ||
-				parsed.SrcRef != tc.src || parsed.Version != tc.ver {
-				t.Errorf("got %+v, want dst=%q edge=%q src=%q ver=%d",
-					parsed, tc.dst, tc.edge, tc.src, tc.ver)
+			if parsed.DstRef != tc.dst || parsed.EdgeType != tc.edge || parsed.SrcRef != tc.src {
+				t.Errorf("got %+v, want dst=%q edge=%q src=%q",
+					parsed, tc.dst, tc.edge, tc.src)
 			}
 		})
 	}
@@ -228,13 +226,28 @@ func TestReverseLinkKey_RoundTrip(t *testing.T) {
 
 func TestReverseLinkKey_Errors(t *testing.T) {
 	t.Parallel()
-	if _, err := BuildReverseLinkKey("", "imports", "e:bar.go", 1); !errors.Is(err, ErrEmptyID) {
+	if _, err := BuildReverseLinkKey("", "imports", "e:bar.go"); !errors.Is(err, ErrEmptyID) {
 		t.Errorf("empty dst: got %v, want ErrEmptyID", err)
 	}
-	if _, err := ParseReverseLinkKey([]byte("e:foo.go:v0000000000000001")); !errors.Is(err, ErrInvalidKey) {
+	if _, err := ParseReverseLinkKey([]byte("e:foo.go")); !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("non-lr prefix: got %v, want ErrInvalidKey", err)
 	}
-	if _, err := ParseReverseLinkKey([]byte("lr:onlyone:v0000000000000001")); !errors.Is(err, ErrInvalidKey) {
+	if _, err := ParseReverseLinkKey([]byte("lr:onlyone")); !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("missing segments: got %v, want ErrInvalidKey", err)
+	}
+}
+
+func TestReverseLinkPrefixForDst(t *testing.T) {
+	t.Parallel()
+	got, err := reverseLinkPrefixForDst("e:foo.go", "imports")
+	if err != nil {
+		t.Fatalf("reverseLinkPrefixForDst: %v", err)
+	}
+	want := []byte(`lr:e\cfoo.go:imports:`)
+	if !bytes.Equal(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if _, err := reverseLinkPrefixForDst("", "x"); !errors.Is(err, ErrEmptyID) {
+		t.Errorf("empty dst: got %v, want ErrEmptyID", err)
 	}
 }

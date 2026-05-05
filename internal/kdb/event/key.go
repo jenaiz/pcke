@@ -102,18 +102,22 @@ func BuildKey(kind Kind, id string, version uint64) ([]byte, error) {
 
 // BuildReverseLinkKey returns the storage key for the reverse-link index.
 // dst, edgeType and src are the typed references and edge type from a
-// Link; the version applies to the same Link record being indexed.
-func BuildReverseLinkKey(dstRef, edgeType, srcRef string, version uint64) ([]byte, error) {
+// Link.
+//
+// Reverse-link keys are NOT versioned: there is exactly one lr: record
+// per (dst, edge, src) tuple. The value of the record is the full key of
+// the latest forward link version. When a link is re-appended (a new
+// version), AppendLink overwrites the lr: value to point at the new
+// forward-key. This trades AS OF support on the reverse path for a
+// constant-time lookup of the current edge state.
+func BuildReverseLinkKey(dstRef, edgeType, srcRef string) ([]byte, error) {
 	if dstRef == "" || edgeType == "" || srcRef == "" {
 		return nil, ErrEmptyID
 	}
 	composite := EscapeID(dstRef) + ":" + EscapeID(edgeType) + ":" + EscapeID(srcRef)
-	verStr := padVersion(version)
-	out := make([]byte, 0, len(ReverseLinkPrefix)+len(composite)+len(versionSeparator)+versionDigits)
+	out := make([]byte, 0, len(ReverseLinkPrefix)+len(composite))
 	out = append(out, ReverseLinkPrefix...)
 	out = append(out, composite...)
-	out = append(out, versionSeparator...)
-	out = append(out, verStr...)
 	return out, nil
 }
 
@@ -173,21 +177,16 @@ type ParsedReverseLinkKey struct {
 	DstRef   string
 	EdgeType string
 	SrcRef   string
-	Version  uint64
 }
 
-// ParseReverseLinkKey decomposes an "lr:<dst>:<edge>:<src>:v<N>" key into
+// ParseReverseLinkKey decomposes an "lr:<dst>:<edge>:<src>" key into
 // its components.
 func ParseReverseLinkKey(key []byte) (ParsedReverseLinkKey, error) {
 	s := string(key)
 	if !strings.HasPrefix(s, ReverseLinkPrefix) {
 		return ParsedReverseLinkKey{}, fmt.Errorf("%w: not a reverse-link key", ErrInvalidKey)
 	}
-	verStart, version, err := splitVersionSuffix(s)
-	if err != nil {
-		return ParsedReverseLinkKey{}, err
-	}
-	body := s[len(ReverseLinkPrefix):verStart]
+	body := s[len(ReverseLinkPrefix):]
 	parts, err := splitEscapedColons(body, 3)
 	if err != nil {
 		return ParsedReverseLinkKey{}, err
@@ -211,8 +210,23 @@ func ParseReverseLinkKey(key []byte) (ParsedReverseLinkKey, error) {
 		DstRef:   dst,
 		EdgeType: edge,
 		SrcRef:   src,
-		Version:  version,
 	}, nil
+}
+
+// reverseLinkPrefixForDst returns the byte prefix matching every reverse-
+// link entry for a given dst+edgeType: "lr:<escaped-dst>:<escaped-edge>:".
+// Used by Store.ReverseLinks for the cursor seek.
+func reverseLinkPrefixForDst(dstRef, edgeType string) ([]byte, error) {
+	if dstRef == "" || edgeType == "" {
+		return nil, ErrEmptyID
+	}
+	out := make([]byte, 0, len(ReverseLinkPrefix)+len(dstRef)+len(edgeType)+4)
+	out = append(out, ReverseLinkPrefix...)
+	out = append(out, EscapeID(dstRef)...)
+	out = append(out, ':')
+	out = append(out, EscapeID(edgeType)...)
+	out = append(out, ':')
+	return out, nil
 }
 
 // padVersion renders v as a fixed-width zero-padded decimal string.

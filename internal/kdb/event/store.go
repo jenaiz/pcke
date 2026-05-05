@@ -106,7 +106,35 @@ func (s *Store) appendInTx(wtx *tx.WriteTx, e Event) ([]byte, error) {
 	if err := wtx.Put(key, value); err != nil {
 		return nil, err
 	}
+	if e.Kind() == KindLink {
+		if err := writeReverseIndex(wtx, e, key); err != nil {
+			return nil, err
+		}
+	}
 	return key, nil
+}
+
+// writeReverseIndex maintains the lr: paired index for a Link event.
+// Called from appendInTx after the forward record is committed in the
+// same WriteTx; the lr: record is overwritten on each new version so
+// reverse lookups always see the current edge state.
+func writeReverseIndex(wtx *tx.WriteTx, e Event, forwardKey []byte) error {
+	link, ok := e.(*Link)
+	if !ok {
+		return fmt.Errorf("%w: KindLink event is not *Link (got %T)", ErrCorrupt, e)
+	}
+	if link.SrcRef == "" || link.EdgeType == "" || link.DstRef == "" {
+		return fmt.Errorf("%w: link requires SrcRef, EdgeType, DstRef", ErrEmptyID)
+	}
+	rkey, err := BuildReverseLinkKey(link.DstRef, link.EdgeType, link.SrcRef)
+	if err != nil {
+		return err
+	}
+	// Value is the forward-link key bytes; clone so the index does not
+	// alias the caller-owned forwardKey buffer.
+	cloned := make([]byte, len(forwardKey))
+	copy(cloned, forwardKey)
+	return wtx.Put(rkey, cloned)
 }
 
 // Latest returns the highest-version event for (kind, id), or
@@ -137,6 +165,65 @@ func (s *Store) Latest(ctx context.Context, kind Kind, id string) (Event, error)
 		return nil, err
 	}
 	return result, nil
+}
+
+// AppendLink is a typed convenience wrapper around Append for Link events.
+// The semantics are identical to Append; the wrapper exists so callers
+// holding a *Link (rather than an Event) avoid an interface assertion.
+//
+// AppendLink writes both the forward (l:) record and the reverse-index
+// (lr:) record in a single transaction. The lr: record is overwritten
+// for each new version so reverse traversals reflect the latest state.
+func (s *Store) AppendLink(ctx context.Context, l *Link) ([]byte, error) {
+	if l == nil {
+		return nil, fmt.Errorf("%w: nil link", ErrCorrupt)
+	}
+	return s.Append(ctx, l)
+}
+
+// ReverseLinks invokes fn once per Link whose DstRef and EdgeType match
+// the supplied pair, yielding the latest version of each matching forward
+// link. The traversal order is the lex order of escaped SrcRef segments.
+//
+// fn may return an error to abort iteration; that error is returned to
+// the caller. Returning ErrNotFound from a callback is allowed (and
+// returned verbatim) — it does not signal "no matches"; the absence of
+// any callback invocation does.
+//
+// The returned events reflect the link as stored, including any
+// LifecycleSuperseded marker; callers wanting only currently-active
+// edges should filter on Lifecycle.
+func (s *Store) ReverseLinks(ctx context.Context, dstRef, edgeType string, fn func(*Link) error) error {
+	prefix, err := reverseLinkPrefixForDst(dstRef, edgeType)
+	if err != nil {
+		return err
+	}
+
+	return s.db.View(ctx, func(rtx *tx.ReadTx) error {
+		return walkChain(rtx.Cursor(), prefix, func(_, value []byte) error {
+			forwardKey := append([]byte(nil), value...)
+			parsed, err := ParseKey(forwardKey)
+			if err != nil {
+				return fmt.Errorf("parse forward key %q: %w", forwardKey, err)
+			}
+			fwdValue, err := rtx.Get(forwardKey)
+			if err != nil {
+				if errors.Is(err, btree.ErrKeyNotFound) {
+					return fmt.Errorf("%w: %q (referenced by lr: index)", ErrSupersedesMissing, forwardKey)
+				}
+				return err
+			}
+			evt, err := Decode(fwdValue, parsed.ID)
+			if err != nil {
+				return fmt.Errorf("decode forward link %q: %w", forwardKey, err)
+			}
+			link, ok := evt.(*Link)
+			if !ok {
+				return fmt.Errorf("%w: lr: index points at non-link %q", ErrCorrupt, forwardKey)
+			}
+			return fn(link)
+		})
+	})
 }
 
 // AsOf returns the highest-version event for (kind, id) whose CreatedAt
