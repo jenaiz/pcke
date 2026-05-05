@@ -63,33 +63,29 @@ func Neighbors(ctx context.Context, db *kdb.DB, start Ref, opts TraversalOptions
 	return out, nil
 }
 
-// walkForward enumerates the latest version of every link with
+// walkForward enumerates the active version of every link with
 // SrcRef == start, applying the edge filter and lifecycle skip.
 //
-// The cursor scan is over the prefix l:<escape(start)>: which sorts all
-// keys belonging to start contiguously by lexicographic order on
-// (escape(edge), escape(dst), version-digits). We collapse versions per
-// (edge, dst) tuple to the lex-greatest key — which is the highest
-// numeric version because of the fixed-width version digits.
+// The cursor scan is over the prefix l:<escape(escape(start))>\c which
+// sorts all keys belonging to start contiguously by lexicographic order
+// on (escape(edge), escape(dst), version-digits). Versions of the same
+// (src, edge, dst) tuple share the body; we collapse them to the
+// "active" one — the latest by default, or the highest with
+// CreatedAt <= AsOf when AsOf is set.
 func walkForward(rtx *tx.ReadTx, start Ref, opts resolvedOpts, emit func(Ref)) error {
 	prefix := forwardSrcPrefix(start)
 	var (
-		currentTuple []byte // last seen "<escapedSrc>:<escapedEdge>:<escapedDst>" body
-		currentValue []byte
+		currentTuple []byte // last seen tuple body
+		chosen       *linkSnapshot
 	)
-	flush := func() error {
-		if currentTuple == nil {
-			return nil
+	flush := func() {
+		if currentTuple == nil || chosen == nil {
+			return
 		}
-		dst, edge, ok := decodeLinkValue(currentValue)
-		if !ok {
-			return fmt.Errorf("forward walk: malformed link value")
+		if !opts.edgeAllowed(chosen.edge) || chosen.lifecycle == event.LifecycleSuperseded {
+			return
 		}
-		if !opts.edgeAllowed(edge) || lifecycleIsSuperseded(currentValue) {
-			return nil
-		}
-		emit(dst)
-		return nil
+		emit(chosen.dst)
 	}
 
 	cursor := rtx.Cursor()
@@ -105,21 +101,33 @@ func walkForward(rtx *tx.ReadTx, start Ref, opts resolvedOpts, emit func(Ref)) e
 		if err != nil {
 			return err
 		}
-		// Different (src, edge, dst) tuple → flush the previous one.
 		if !bytes.Equal(body, currentTuple) {
-			if err := flush(); err != nil {
-				return err
-			}
+			flush()
 			currentTuple = append(currentTuple[:0], body...)
+			chosen = nil
 		}
-		currentValue = cursor.Value()
+		snap, ok := decodeLinkSnapshot(cursor.Value())
+		if !ok {
+			return fmt.Errorf("forward walk: malformed link value")
+		}
+		if opts.asOf == nil || !snap.createdAt.After(*opts.asOf) {
+			snapCopy := snap
+			chosen = &snapCopy
+		}
 		cursor.Next()
 	}
-	return flush()
+	flush()
+	return nil
 }
 
-// walkReverse enumerates lr:<escape(start)>:* entries, fetches each
-// pointed-at forward record, and yields the SrcRef.
+// walkReverse enumerates lr:<escape(start)>: entries, resolves each to
+// the active version of its forward link, and yields the SrcRef.
+//
+// Without AsOf the lr: value points directly at the latest forward key,
+// so a single Get suffices. With AsOf set, we instead scan the chain
+// for that link to find the version active at the pinned timestamp;
+// the lr: index serves only to enumerate which links exist for this
+// dst (their identity, not their version).
 func walkReverse(rtx *tx.ReadTx, start Ref, opts resolvedOpts, emit func(Ref)) error {
 	prefix := reverseDstPrefix(start)
 	cursor := rtx.Cursor()
@@ -132,32 +140,96 @@ func walkReverse(rtx *tx.ReadTx, start Ref, opts resolvedOpts, emit func(Ref)) e
 			break
 		}
 		fwdKey := append([]byte(nil), cursor.Value()...)
-
-		parsed, err := event.ParseKey(fwdKey)
-		if err != nil {
-			return fmt.Errorf("reverse walk: parse forward key %q: %w", fwdKey, err)
-		}
-		fwdValue, err := rtx.Get(fwdKey)
-		if err != nil {
-			if errors.Is(err, btree.ErrKeyNotFound) {
-				return fmt.Errorf("reverse walk: dangling forward key %q", fwdKey)
-			}
+		if err := emitReverseLink(rtx, fwdKey, opts, emit); err != nil {
 			return err
 		}
-		evt, err := event.Decode(fwdValue, parsed.ID)
-		if err != nil {
-			return fmt.Errorf("reverse walk: decode %q: %w", fwdKey, err)
-		}
-		link, ok := evt.(*event.Link)
-		if !ok {
-			return fmt.Errorf("reverse walk: %q is not a link", fwdKey)
-		}
-		if !opts.edgeAllowed(link.EdgeType) || link.Header().Lifecycle == event.LifecycleSuperseded {
-			cursor.Next()
-			continue
-		}
-		emit(Ref(link.SrcRef))
 		cursor.Next()
 	}
+	return nil
+}
+
+// emitReverseLink resolves one lr: entry's forward record (latest by
+// default, AsOf-pinned otherwise), applies filters, and emits SrcRef.
+func emitReverseLink(rtx *tx.ReadTx, fwdKey []byte, opts resolvedOpts, emit func(Ref)) error {
+	if opts.asOf == nil {
+		return emitReverseLinkLatest(rtx, fwdKey, opts, emit)
+	}
+	return emitReverseLinkAsOf(rtx, fwdKey, opts, emit)
+}
+
+func emitReverseLinkLatest(rtx *tx.ReadTx, fwdKey []byte, opts resolvedOpts, emit func(Ref)) error {
+	fwdValue, err := rtx.Get(fwdKey)
+	if err != nil {
+		if errors.Is(err, btree.ErrKeyNotFound) {
+			return fmt.Errorf("reverse walk: dangling forward key %q", fwdKey)
+		}
+		return err
+	}
+	parsed, err := event.ParseKey(fwdKey)
+	if err != nil {
+		return fmt.Errorf("reverse walk: parse forward key %q: %w", fwdKey, err)
+	}
+	evt, err := event.Decode(fwdValue, parsed.ID)
+	if err != nil {
+		return fmt.Errorf("reverse walk: decode %q: %w", fwdKey, err)
+	}
+	link, ok := evt.(*event.Link)
+	if !ok {
+		return fmt.Errorf("reverse walk: %q is not a link", fwdKey)
+	}
+	if !opts.edgeAllowed(link.EdgeType) || link.Header().Lifecycle == event.LifecycleSuperseded {
+		return nil
+	}
+	emit(Ref(link.SrcRef))
+	return nil
+}
+
+func emitReverseLinkAsOf(rtx *tx.ReadTx, fwdKey []byte, opts resolvedOpts, emit func(Ref)) error {
+	chainPrefix, err := chainPrefixFromForwardKey(fwdKey)
+	if err != nil {
+		return err
+	}
+	cursor := rtx.Cursor()
+	if !cursor.Seek(chainPrefix) {
+		return nil
+	}
+	var chosen *linkSnapshot
+	var src string
+	for cursor.Valid() {
+		key := cursor.Key()
+		if !bytes.HasPrefix(key, chainPrefix) {
+			break
+		}
+		snap, ok := decodeLinkSnapshot(cursor.Value())
+		if !ok {
+			return fmt.Errorf("reverse walk: malformed link value at %q", key)
+		}
+		if !snap.createdAt.After(*opts.asOf) {
+			snapCopy := snap
+			chosen = &snapCopy
+			// Capture src once — it doesn't change across versions.
+			if src == "" {
+				parsed, err := event.ParseKey(key)
+				if err != nil {
+					return fmt.Errorf("reverse walk: parse %q: %w", key, err)
+				}
+				evt, err := event.Decode(cursor.Value(), parsed.ID)
+				if err != nil {
+					return fmt.Errorf("reverse walk: decode %q: %w", key, err)
+				}
+				if link, isLink := evt.(*event.Link); isLink {
+					src = link.SrcRef
+				}
+			}
+		}
+		cursor.Next()
+	}
+	if chosen == nil || src == "" {
+		return nil
+	}
+	if !opts.edgeAllowed(chosen.edge) || chosen.lifecycle == event.LifecycleSuperseded {
+		return nil
+	}
+	emit(Ref(src))
 	return nil
 }

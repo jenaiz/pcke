@@ -3,6 +3,7 @@ package graph
 import (
 	"bytes"
 	"fmt"
+	"time"
 
 	"github.com/jenaiz/pcke/internal/kdb/event"
 )
@@ -62,39 +63,57 @@ func splitChainTuple(key []byte) ([]byte, error) {
 	return body, nil
 }
 
-// decodeLinkValue decodes a forward-link value enough to extract the
-// DstRef and EdgeType. It returns false if the value is not parseable
-// as a Link.
-//
-// We avoid a full event.Decode here because the forward-walk path reads
-// many records per traversal and only needs two fields; a focused
-// decoder is meaningfully cheaper. The benchmark in commit 4 of T3 will
-// validate the win.
-//
-// For simplicity and correctness during T3 commit 1, this function
-// delegates to event.Decode and asserts the result is a Link. The
-// micro-optimised scanner can replace this body later.
-func decodeLinkValue(value []byte) (dst Ref, edge string, ok bool) {
-	const dummyID = "x:x:x" // any non-empty id; Link uses its own composite id
-	evt, err := event.Decode(value, dummyID)
-	if err != nil {
-		return "", "", false
-	}
-	link, isLink := evt.(*event.Link)
-	if !isLink {
-		return "", "", false
-	}
-	return Ref(link.DstRef), link.EdgeType, true
+// linkSnapshot is the subset of a forward-link record the graph walks
+// care about. Folding all four fields into a single decode call avoids
+// re-running event.Decode three times per record.
+type linkSnapshot struct {
+	dst       Ref
+	edge      string
+	lifecycle event.Lifecycle
+	createdAt time.Time
 }
 
-// lifecycleIsSuperseded reports whether the encoded link record carries
-// LifecycleSuperseded. We re-decode the value (small cost; T3 commit 4
-// can collapse this into decodeLinkValue).
-func lifecycleIsSuperseded(value []byte) bool {
+// decodeLinkSnapshot decodes a forward-link value into the fields the
+// traversal needs. Returns ok=false if the value is not a Link record.
+//
+// The id passed to event.Decode is a placeholder — it is required by
+// the codec API but the snapshot does not need it (we only read the
+// payload + header). A focused decoder that reads just these fields
+// could replace this body for additional speedup; benchmarks in T8
+// will tell us whether it is worth doing.
+func decodeLinkSnapshot(value []byte) (linkSnapshot, bool) {
 	const dummyID = "x:x:x"
 	evt, err := event.Decode(value, dummyID)
 	if err != nil {
-		return false
+		return linkSnapshot{}, false
 	}
-	return evt.Header().Lifecycle == event.LifecycleSuperseded
+	link, ok := evt.(*event.Link)
+	if !ok {
+		return linkSnapshot{}, false
+	}
+	return linkSnapshot{
+		dst:       Ref(link.DstRef),
+		edge:      link.EdgeType,
+		lifecycle: link.Header().Lifecycle,
+		createdAt: link.Header().CreatedAt,
+	}, true
+}
+
+// chainPrefixFromForwardKey returns the byte prefix that matches every
+// version of the link identified by forwardKey. Used by the reverse
+// walk under AsOf to scan the chain for the version active at the
+// pinned timestamp.
+//
+// Implementation: drop the trailing ":v<16 digits>", append ":v" so the
+// remaining prefix matches all version siblings.
+func chainPrefixFromForwardKey(forwardKey []byte) ([]byte, error) {
+	const versionTail = len(":v") + 16
+	if len(forwardKey) < versionTail+len("l:") {
+		return nil, fmt.Errorf("graph: forward key too short: %q", forwardKey)
+	}
+	body := forwardKey[:len(forwardKey)-versionTail]
+	out := make([]byte, len(body)+len(":v"))
+	copy(out, body)
+	copy(out[len(body):], ":v")
+	return out, nil
 }

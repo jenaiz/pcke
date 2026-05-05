@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/event"
@@ -43,6 +44,22 @@ func (f *fixture) appendLink(t *testing.T, src, edge, dst string) {
 		SrcRef: src, EdgeType: edge, DstRef: dst,
 	}); err != nil {
 		t.Fatalf("AppendLink %s --%s--> %s: %v", src, edge, dst, err)
+	}
+}
+
+// appendLinkAt is appendLink with an explicit CreatedAt; used to drive
+// AsOf traversal tests deterministically. event.Store.appendInTx
+// preserves a non-zero CreatedAt set on the header.
+func (f *fixture) appendLinkAt(t *testing.T, src, edge, dst string, at time.Time, lifecycle event.Lifecycle) {
+	t.Helper()
+	link := &event.Link{
+		Hdr:      event.Header{CreatedAt: at, Lifecycle: lifecycle},
+		SrcRef:   src,
+		EdgeType: edge,
+		DstRef:   dst,
+	}
+	if _, err := f.store.AppendLink(context.Background(), link); err != nil {
+		t.Fatalf("AppendLink %s --%s--> %s @ %v: %v", src, edge, dst, at, err)
 	}
 }
 
