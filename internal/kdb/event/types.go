@@ -103,6 +103,9 @@ type Event interface {
 	ID() string
 	// Header returns the event's header metadata.
 	Header() Header
+	// SetHeader replaces the event's header. Used by Store.Append to stamp
+	// version, supersedes pointer, lifecycle and timestamp before encoding.
+	SetHeader(Header)
 	// encodePayload writes the kind-specific fields to the encoder.
 	// Header fields are written by Encode before this is called.
 	encodePayload(*encoding.Encoder)
@@ -164,6 +167,9 @@ func (e *Entity) ID() string { return e.EID }
 // Header returns the entity's header metadata.
 func (e *Entity) Header() Header { return e.Hdr }
 
+// SetHeader replaces the entity's header metadata.
+func (e *Entity) SetHeader(h Header) { e.Hdr = h }
+
 func (e *Entity) encodePayload(enc *encoding.Encoder) {
 	if e.Type != "" {
 		enc.PutString(fieldEntityType, e.Type)
@@ -198,6 +204,9 @@ func (d *Decision) ID() string { return d.DID }
 
 // Header returns the decision's header metadata.
 func (d *Decision) Header() Header { return d.Hdr }
+
+// SetHeader replaces the decision's header metadata.
+func (d *Decision) SetHeader(h Header) { d.Hdr = h }
 
 func (d *Decision) encodePayload(enc *encoding.Encoder) {
 	if d.Title != "" {
@@ -245,6 +254,9 @@ func (l *Link) ID() string {
 // Header returns the link's header metadata.
 func (l *Link) Header() Header { return l.Hdr }
 
+// SetHeader replaces the link's header metadata.
+func (l *Link) SetHeader(h Header) { l.Hdr = h }
+
 func (l *Link) encodePayload(enc *encoding.Encoder) {
 	if l.SrcRef != "" {
 		enc.PutString(fieldLinkSrcRef, l.SrcRef)
@@ -275,6 +287,9 @@ func (o *Observation) ID() string { return o.OID }
 // Header returns the observation's header metadata.
 func (o *Observation) Header() Header { return o.Hdr }
 
+// SetHeader replaces the observation's header metadata.
+func (o *Observation) SetHeader(h Header) { o.Hdr = h }
+
 func (o *Observation) encodePayload(enc *encoding.Encoder) {
 	if o.Action != "" {
 		enc.PutString(fieldObservationAction, o.Action)
@@ -301,6 +316,9 @@ func (o *Outcome) ID() string { return o.XID }
 
 // Header returns the outcome's header metadata.
 func (o *Outcome) Header() Header { return o.Hdr }
+
+// SetHeader replaces the outcome's header metadata.
+func (o *Outcome) SetHeader(h Header) { o.Hdr = h }
 
 func (o *Outcome) encodePayload(enc *encoding.Encoder) {
 	if o.Type != "" {

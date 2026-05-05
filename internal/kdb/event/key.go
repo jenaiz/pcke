@@ -220,6 +220,35 @@ func padVersion(v uint64) string {
 	return fmt.Sprintf("%0*d", versionDigits, v)
 }
 
+// chainPrefix returns the byte prefix shared by every version of a given
+// (kind, id): "<prefix><escaped-id>:v". It is used as a cursor seek target
+// when scanning a single id's version chain.
+func chainPrefix(kind Kind, id string) ([]byte, error) {
+	prefix := kind.Prefix()
+	if prefix == "" {
+		return nil, ErrInvalidKind
+	}
+	if id == "" {
+		return nil, ErrEmptyID
+	}
+	escaped := EscapeID(id)
+	out := make([]byte, 0, len(prefix)+len(escaped)+len(versionSeparator))
+	out = append(out, prefix...)
+	out = append(out, escaped...)
+	out = append(out, versionSeparator...)
+	return out, nil
+}
+
+// kindPrefix returns the byte prefix that delimits all events of a given
+// kind: just "<prefix>". Used by IterateKind for the outer scan.
+func kindPrefix(kind Kind) ([]byte, error) {
+	prefix := kind.Prefix()
+	if prefix == "" {
+		return nil, ErrInvalidKind
+	}
+	return []byte(prefix), nil
+}
+
 // splitVersionSuffix locates the trailing ":v<digits>" and returns the
 // byte offset where the suffix starts plus the parsed version number.
 func splitVersionSuffix(s string) (verStart int, version uint64, err error) {

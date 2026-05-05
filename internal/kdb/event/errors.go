@@ -33,4 +33,7 @@ var (
 	// ErrSchemaVersion indicates a record carries a schema version this
 	// build does not understand.
 	ErrSchemaVersion = errors.New("event: unsupported schema version")
+
+	// ErrNotFound indicates no version exists for the requested (kind, id).
+	ErrNotFound = errors.New("event: not found")
 )
