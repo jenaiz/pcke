@@ -1,17 +1,6 @@
-// Package event provides the typed-event log primitives for kdb.
-//
-// Events are immutable, versioned records of one of five kinds:
-// Entity, Decision, Observation, Outcome, Link. Each event has a key
-// of the form "<prefix>:<id>:v<N>" with monotonic version numbers,
-// and a value carrying header metadata (version, supersedes pointer,
-// created_at, lifecycle) plus kind-specific fields.
-//
-// Updates are append-only: a new version is written with a Supersedes
-// pointer to the prior version's key. The "current" view of an entity
-// is the highest-version record whose lifecycle is not superseded or
-// historical.
-//
-// This file defines the kind enum and prefix mapping.
+// This file defines the Kind enum and prefix mapping. The package
+// overview lives in doc.go.
+
 package event
 
 // Kind identifies the type of an event record.
