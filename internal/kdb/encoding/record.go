@@ -75,6 +75,14 @@ func (e *Encoder) PutBool(fieldID uint8, v bool) {
 	e.fieldCount++
 }
 
+// PutUint8 appends a uint8 field (WireFixed8). Use for small enums.
+// Readers expecting a bool will see truthy for any nonzero value.
+func (e *Encoder) PutUint8(fieldID uint8, v uint8) {
+	e.buf = append(e.buf, MakeTag(fieldID, WireFixed8))
+	e.buf = append(e.buf, v)
+	e.fieldCount++
+}
+
 // PutStringList appends a list<string> field (WireList).
 func (e *Encoder) PutStringList(fieldID uint8, v []string) {
 	e.buf = append(e.buf, MakeTag(fieldID, WireList))
@@ -237,6 +245,16 @@ func (d *Decoder) Bool() (bool, error) {
 		return false, ErrUnexpectedEOF
 	}
 	v := d.data[d.pos] != 0
+	d.pos++
+	return v, nil
+}
+
+// Uint8 reads a WireFixed8 value as uint8. Use for small enums.
+func (d *Decoder) Uint8() (uint8, error) {
+	if d.pos >= len(d.data) {
+		return 0, ErrUnexpectedEOF
+	}
+	v := d.data[d.pos]
 	d.pos++
 	return v, nil
 }
