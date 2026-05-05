@@ -1202,6 +1202,9 @@ func registerMigrations(e *migrate.Engine) {
 	// v10 — F12.T1 typed-event log baseline. Schema-version bump only;
 	// data translation lands in F12.T6 as migrations 0011–0014.
 	e.Register(migrate.V0010EventBaseline())
+	// v11 — F12.T6: translate legacy kn: knowledge-node records into
+	// typed Entity (e:) events. Idempotent; legacy records preserved.
+	e.Register(migrate.V0011MigrateKnToE())
 }
 
 // configGet returns the value of a dotted config key (e.g. "scan.redact_secrets").

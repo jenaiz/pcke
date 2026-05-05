@@ -7,18 +7,31 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/btree"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
 
-// Store wraps a *kdb.DB and provides versioned event-log operations.
+// StoreDB is the minimal database interface the event Store requires.
+// *kdb.DB satisfies it, as does any wrapper exposing View and Update
+// (e.g. the migrate.UpdateDB used by data migrations).
 //
-// The Store does not own the DB; callers manage Open/Close. All public
-// methods acquire their own kdb transactions; internal helpers exist for
-// migrations that need to interleave with an existing WriteTx.
+// Defining the dependency as an interface lets sibling packages — most
+// importantly internal/kdb/migrate — instantiate a Store without
+// importing the parent kdb package directly (which would form an
+// import cycle).
+type StoreDB interface {
+	View(ctx context.Context, fn func(*tx.ReadTx) error) error
+	Update(ctx context.Context, fn func(*tx.WriteTx) error) error
+}
+
+// Store provides versioned event-log operations.
+//
+// The Store does not own the underlying DB; callers manage Open/Close.
+// All public methods acquire their own kdb transactions; AppendInTx
+// is exposed for migration code that needs to batch multiple events
+// inside an existing WriteTx.
 type Store struct {
-	db *kdb.DB
+	db StoreDB
 
 	// now is the timestamp source. Tests substitute a deterministic clock;
 	// production callers leave it nil and the store uses time.Now.
@@ -26,7 +39,7 @@ type Store struct {
 }
 
 // New constructs a Store backed by db.
-func New(db *kdb.DB) *Store {
+func New(db StoreDB) *Store {
 	return &Store{db: db}
 }
 
@@ -63,11 +76,25 @@ func (s *Store) Append(ctx context.Context, e Event) ([]byte, error) {
 	return resultKey, nil
 }
 
-// appendInTx is the migration-facing helper: writes the next version of e
-// using the supplied open WriteTx. Migrations 0011–0014 (F12.T6) call this
-// to translate legacy records without nesting db.Update.
+// AppendInTx writes the next version of e using the supplied open
+// WriteTx. Use this when batching many events in a single transaction
+// (e.g. from a schema migration) so kdb's write lock is not contended
+// per event and CoW page churn is minimised.
 //
 // Caller is responsible for the transaction lifecycle (Commit/Rollback).
+//
+// Semantics mirror Append: the event header is mutated in place with
+// the assigned version, supersedes pointer (if any), default lifecycle,
+// and timestamp; the forward record is written, and for KindLink the
+// paired lr: record is overwritten in the same transaction.
+func (s *Store) AppendInTx(wtx *tx.WriteTx, e Event) ([]byte, error) {
+	return s.appendInTx(wtx, e)
+}
+
+// appendInTx is the package-internal helper that AppendInTx wraps. It
+// is also called directly by Append (which provides the surrounding
+// db.Update). Keeping the unexported entry-point allows the public
+// API to stay narrow without exposing tx.WriteTx to every caller.
 func (s *Store) appendInTx(wtx *tx.WriteTx, e Event) ([]byte, error) {
 	if e == nil {
 		return nil, fmt.Errorf("%w: nil event", ErrCorrupt)

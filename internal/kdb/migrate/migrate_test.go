@@ -6,15 +6,22 @@ import (
 	"testing"
 
 	"github.com/jenaiz/pcke/internal/kdb/migrate"
+	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
 
-// mockDB implements migrate.DB for testing.
+// mockDB implements migrate.UpdateDB for unit tests of the engine.
+// View/Update are no-ops because these tests don't exercise data
+// transactions; the data-migration suites (v0010, v0011, ...) drive a
+// real *kdb.DB instead.
 type mockDB struct {
 	version uint16
 }
 
 func (m *mockDB) SchemaVersion() uint16     { return m.version }
 func (m *mockDB) SetSchemaVersion(v uint16) { m.version = v }
+
+func (m *mockDB) View(_ context.Context, _ func(*tx.ReadTx) error) error    { return nil }
+func (m *mockDB) Update(_ context.Context, _ func(*tx.WriteTx) error) error { return nil }
 
 func TestEngine_RunEmpty(t *testing.T) {
 	e := migrate.New()
@@ -38,7 +45,7 @@ func TestEngine_RunSequential(t *testing.T) {
 		e.Register(migrate.Migration{
 			Version:     v,
 			Description: "test migration",
-			Migrate: func(_ context.Context, _ migrate.DB) error {
+			Migrate: func(_ context.Context, _ migrate.UpdateDB) error {
 				order = append(order, v)
 				return nil
 			},
@@ -68,7 +75,7 @@ func TestEngine_Idempotent(t *testing.T) {
 	e.Register(migrate.Migration{
 		Version:     1,
 		Description: "first",
-		Migrate: func(_ context.Context, _ migrate.DB) error {
+		Migrate: func(_ context.Context, _ migrate.UpdateDB) error {
 			count++
 			return nil
 		},
@@ -104,21 +111,21 @@ func TestEngine_PartialApplication(t *testing.T) {
 	e.Register(migrate.Migration{
 		Version:     1,
 		Description: "first",
-		Migrate: func(_ context.Context, _ migrate.DB) error {
+		Migrate: func(_ context.Context, _ migrate.UpdateDB) error {
 			return nil
 		},
 	})
 	e.Register(migrate.Migration{
 		Version:     2,
 		Description: "fails",
-		Migrate: func(_ context.Context, _ migrate.DB) error {
+		Migrate: func(_ context.Context, _ migrate.UpdateDB) error {
 			return errors.New("boom")
 		},
 	})
 	e.Register(migrate.Migration{
 		Version:     3,
 		Description: "third",
-		Migrate: func(_ context.Context, _ migrate.DB) error {
+		Migrate: func(_ context.Context, _ migrate.UpdateDB) error {
 			return nil
 		},
 	})
@@ -145,7 +152,7 @@ func TestEngine_SkipsApplied(t *testing.T) {
 		e.Register(migrate.Migration{
 			Version:     v,
 			Description: "test",
-			Migrate: func(_ context.Context, _ migrate.DB) error {
+			Migrate: func(_ context.Context, _ migrate.UpdateDB) error {
 				ran = append(ran, v)
 				return nil
 			},
@@ -170,7 +177,7 @@ func TestEngine_SchemaVersionMismatch(t *testing.T) {
 	e.Register(migrate.Migration{
 		Version:     1,
 		Description: "first",
-		Migrate: func(_ context.Context, _ migrate.DB) error {
+		Migrate: func(_ context.Context, _ migrate.UpdateDB) error {
 			return nil
 		},
 	})
@@ -190,7 +197,7 @@ func TestEngine_ConflictPanics(t *testing.T) {
 	e.Register(migrate.Migration{
 		Version:     1,
 		Description: "first",
-		Migrate:     func(_ context.Context, _ migrate.DB) error { return nil },
+		Migrate:     func(_ context.Context, _ migrate.UpdateDB) error { return nil },
 	})
 
 	defer func() {
@@ -203,7 +210,7 @@ func TestEngine_ConflictPanics(t *testing.T) {
 	e.Register(migrate.Migration{
 		Version:     1,
 		Description: "duplicate",
-		Migrate:     func(_ context.Context, _ migrate.DB) error { return nil },
+		Migrate:     func(_ context.Context, _ migrate.UpdateDB) error { return nil },
 	})
 }
 
@@ -214,7 +221,7 @@ func TestEngine_Pending(t *testing.T) {
 		e.Register(migrate.Migration{
 			Version:     v,
 			Description: "test",
-			Migrate:     func(_ context.Context, _ migrate.DB) error { return nil },
+			Migrate:     func(_ context.Context, _ migrate.UpdateDB) error { return nil },
 		})
 	}
 
@@ -235,8 +242,8 @@ func TestEngine_LatestVersion(t *testing.T) {
 		t.Errorf("empty engine: LatestVersion = %d, want 0", got)
 	}
 
-	e.Register(migrate.Migration{Version: 3, Description: "a", Migrate: func(_ context.Context, _ migrate.DB) error { return nil }})
-	e.Register(migrate.Migration{Version: 1, Description: "b", Migrate: func(_ context.Context, _ migrate.DB) error { return nil }})
+	e.Register(migrate.Migration{Version: 3, Description: "a", Migrate: func(_ context.Context, _ migrate.UpdateDB) error { return nil }})
+	e.Register(migrate.Migration{Version: 1, Description: "b", Migrate: func(_ context.Context, _ migrate.UpdateDB) error { return nil }})
 
 	if got := e.LatestVersion(); got != 3 {
 		t.Errorf("LatestVersion = %d, want 3", got)
@@ -248,12 +255,12 @@ func TestEngine_CancelledContext(t *testing.T) {
 	e.Register(migrate.Migration{
 		Version:     1,
 		Description: "first",
-		Migrate:     func(_ context.Context, _ migrate.DB) error { return nil },
+		Migrate:     func(_ context.Context, _ migrate.UpdateDB) error { return nil },
 	})
 	e.Register(migrate.Migration{
 		Version:     2,
 		Description: "second",
-		Migrate:     func(_ context.Context, _ migrate.DB) error { return nil },
+		Migrate:     func(_ context.Context, _ migrate.UpdateDB) error { return nil },
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

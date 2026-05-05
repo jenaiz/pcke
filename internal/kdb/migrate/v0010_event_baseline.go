@@ -18,7 +18,7 @@ func V0010EventBaseline() Migration {
 	return Migration{
 		Version:     10,
 		Description: "register typed-event log namespaces (e:/d:/l:/lr:/o:/x:)",
-		Migrate: func(_ context.Context, _ DB) error {
+		Migrate: func(_ context.Context, _ UpdateDB) error {
 			// No data churn. The schema-version bump is performed by
 			// the engine after this function returns nil.
 			return nil

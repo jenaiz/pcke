@@ -64,26 +64,23 @@
 //
 // # Contract for migrations 0011–0014 (F12.T6)
 //
-// The data-translation migrations introduced by F12.T6 will translate
-// legacy kn:/rel:/nt:/el: records into typed events. Those migrations
-// must run inside an existing kdb WriteTx (so all writes commit or
-// none do), and they need a way to call into this package without
-// nesting a fresh db.Update. The exported guarantees they rely on:
+// The data-translation migrations introduced by F12.T6 translate
+// legacy kn:/rel:/nt:/el: records into typed events. They run inside a
+// single kdb WriteTx per batch so all writes commit or none do, and
+// they call into this package without nesting db.Update. The exported
+// guarantees they rely on:
 //
-//   - event.Store.appendInTx(wtx, e) writes the next version of e
-//     using the supplied transaction. It is package-internal; the
-//     migrations live in this module and call it directly.
-//   - event.BuildKey and event.BuildReverseLinkKey are stable. Migrations
-//     that need to craft deterministic keys (e.g. mapping kn:foo.go to
-//     e:foo.go:v0000000000000001) build them with these helpers so the
-//     escape rules stay consistent.
+//   - event.Store.AppendInTx(wtx, e) writes the next version of e
+//     using the supplied transaction. Mirrors Append's semantics
+//     (header stamping, lifecycle default, lr: pairing for Link kind).
+//   - event.BuildKey and event.BuildReverseLinkKey are stable.
+//     Migrations that craft deterministic keys (e.g. mapping kn:foo.go
+//     to e:foo.go:v0000000000000001) build them with these helpers so
+//     the escape rules stay consistent.
 //   - event.Encode round-trips with event.Decode for every concrete
-//     event type. Migrations that need to round-trip a synthesized
-//     header may use Encode directly; otherwise prefer Append/AppendLink.
+//     event type. Migrations that need to round-trip a synthesised
+//     header may use Encode directly; otherwise prefer Append/AppendLink/AppendInTx.
 //   - The schema-version field on the meta page is bumped to 10 by
 //     migration 0010 (a pure marker). Migrations 0011–0014 may assume
 //     the event prefixes are reserved.
-//
-// Migrations 0011–0014 are not part of T1; this package only ships
-// the primitives they will consume.
 package event

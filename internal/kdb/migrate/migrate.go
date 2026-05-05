@@ -39,7 +39,11 @@ type DB interface {
 
 // MigrationFunc is a function that migrates the database from version (v-1) to v.
 // The context can be used for cancellation of long-running migrations.
-type MigrationFunc func(ctx context.Context, db DB) error
+//
+// The db argument is an UpdateDB so data migrations can read and write
+// records inside their own transactions. Pure version-marker migrations
+// (e.g. V0010EventBaseline) ignore db and simply return nil.
+type MigrationFunc func(ctx context.Context, db UpdateDB) error
 
 // Migration describes a single schema migration step.
 type Migration struct {
@@ -114,7 +118,7 @@ func (e *Engine) LatestVersion() uint16 {
 // Each migration updates the schema version after successful application,
 // so a failure mid-run leaves the database at the last successfully applied
 // version.
-func (e *Engine) Run(ctx context.Context, db DB) (int, error) {
+func (e *Engine) Run(ctx context.Context, db UpdateDB) (int, error) {
 	current := db.SchemaVersion()
 	latest := e.LatestVersion()
 
