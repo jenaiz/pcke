@@ -139,6 +139,139 @@ func (s *Store) Latest(ctx context.Context, kind Kind, id string) (Event, error)
 	return result, nil
 }
 
+// AsOf returns the highest-version event for (kind, id) whose CreatedAt
+// is less than or equal to t.
+//
+// Use cases:
+//   - t before the first version → ErrNotFound
+//   - t between vN and v(N+1)    → returns vN
+//   - t at or after the latest   → returns the latest
+//
+// Implementation: linear walk of the version chain. Chains are short for
+// typical entities; if you need sub-linear AsOf later, replace the body
+// with a binary-search cursor probe — the public contract is stable.
+func (s *Store) AsOf(ctx context.Context, kind Kind, id string, t time.Time) (Event, error) {
+	if id == "" {
+		return nil, ErrEmptyID
+	}
+
+	prefix, err := chainPrefix(kind, id)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		chosen Event
+		seen   bool
+	)
+	err = s.db.View(ctx, func(rtx *tx.ReadTx) error {
+		return walkChain(rtx.Cursor(), prefix, func(key, value []byte) error {
+			seen = true
+			parsed, err := ParseKey(key)
+			if err != nil {
+				return fmt.Errorf("parse %q: %w", key, err)
+			}
+			evt, err := Decode(value, parsed.ID)
+			if err != nil {
+				return fmt.Errorf("decode %q: %w", key, err)
+			}
+			created := evt.Header().CreatedAt
+			if created.After(t) {
+				// Chain is oldest-first; once we cross the cutoff we stop.
+				return errStopWalk
+			}
+			chosen = evt
+			return nil
+		})
+	})
+	if err != nil && !errors.Is(err, errStopWalk) {
+		return nil, err
+	}
+	if !seen {
+		return nil, ErrNotFound
+	}
+	if chosen == nil {
+		// Chain exists but every version is after t.
+		return nil, ErrNotFound
+	}
+	return chosen, nil
+}
+
+// ResolveSupersedes walks the supersedes chain starting from startKey,
+// returning the events in order from newest (the supplied key) to oldest
+// (the chain's terminator).
+//
+// maxHops is the maximum number of supersedes pointers to follow after
+// the start key. A maxHops of 0 reads only the start. A negative value
+// is treated as 0.
+//
+// Errors:
+//   - ErrInvalidKey if startKey is empty
+//   - ErrNotFound if startKey itself is absent
+//   - ErrSupersedesMissing if a supersedes pointer dangles
+//   - ErrSupersedesLoop if a key is revisited or hops exceed maxHops
+func (s *Store) ResolveSupersedes(ctx context.Context, startKey []byte, maxHops int) ([]Event, error) {
+	if len(startKey) == 0 {
+		return nil, ErrInvalidKey
+	}
+	if maxHops < 0 {
+		maxHops = 0
+	}
+
+	var chain []Event
+	visited := make(map[string]struct{}, maxHops+1)
+	currentKey := append([]byte(nil), startKey...) // own the buffer
+
+	err := s.db.View(ctx, func(rtx *tx.ReadTx) error {
+		hops := 0
+		for {
+			ks := string(currentKey)
+			if _, dup := visited[ks]; dup {
+				return fmt.Errorf("%w: cycle at %q", ErrSupersedesLoop, currentKey)
+			}
+			visited[ks] = struct{}{}
+
+			value, err := rtx.Get(currentKey)
+			if err != nil {
+				if errors.Is(err, btree.ErrKeyNotFound) {
+					if len(chain) == 0 {
+						return ErrNotFound
+					}
+					return fmt.Errorf("%w: %q", ErrSupersedesMissing, currentKey)
+				}
+				return err
+			}
+			parsed, err := ParseKey(currentKey)
+			if err != nil {
+				return fmt.Errorf("parse %q: %w", currentKey, err)
+			}
+			evt, err := Decode(value, parsed.ID)
+			if err != nil {
+				return fmt.Errorf("decode %q: %w", currentKey, err)
+			}
+			chain = append(chain, evt)
+
+			next := evt.Header().Supersedes
+			if len(next) == 0 {
+				return nil
+			}
+			if hops >= maxHops {
+				return fmt.Errorf("%w: %d hops without terminator", ErrSupersedesLoop, hops)
+			}
+			hops++
+			currentKey = append(currentKey[:0], next...)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return chain, nil
+}
+
+// errStopWalk is a sentinel returned by AsOf's walk callback once the
+// timestamp cutoff is crossed; the outer caller filters it out.
+var errStopWalk = errors.New("event: stop walk")
+
 // History yields every version of (kind, id), oldest first, calling fn
 // for each. The callback may return an error to abort iteration; that
 // error is returned to the caller.

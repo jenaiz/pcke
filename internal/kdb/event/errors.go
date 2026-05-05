@@ -36,4 +36,12 @@ var (
 
 	// ErrNotFound indicates no version exists for the requested (kind, id).
 	ErrNotFound = errors.New("event: not found")
+
+	// ErrSupersedesLoop indicates a supersedes-chain walk exceeded the
+	// caller-supplied hop limit, or revisited a key (cycle).
+	ErrSupersedesLoop = errors.New("event: supersedes loop or hop limit exceeded")
+
+	// ErrSupersedesMissing indicates a supersedes pointer references a key
+	// that is no longer present in the store.
+	ErrSupersedesMissing = errors.New("event: supersedes target missing")
 )
