@@ -1211,6 +1211,10 @@ func registerMigrations(e *migrate.Engine) {
 	// v13 — F12.T6: translate legacy nt: note records into typed
 	// Decision (d:) events with severity=should, scope=global, source=manual.
 	e.Register(migrate.V0013MigrateNtToD())
+	// v14 — F12.T6: retire legacy el: evolution-log records (regenerated
+	// by the next scan from git history; new schema captures evolution
+	// as the version chain on Entity events).
+	e.Register(migrate.V0014RetireEvolutionLog())
 }
 
 // configGet returns the value of a dotted config key (e.g. "scan.redact_secrets").
