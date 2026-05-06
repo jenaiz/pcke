@@ -130,6 +130,136 @@ func (p *parser) parseAsOf() (*time.Time, error) {
 	return &parsed, nil
 }
 
+// parseTraverse parses the TRAVERSE(args) FROM '<startkey>' production.
+// "TRAVERSE" itself has been peeked but not consumed by parseWhere;
+// this function consumes everything from "TRAVERSE" through the
+// closing string literal.
+//
+// Grammar:
+//
+//	TRAVERSE '(' edge_name (',' named_arg)* ')' FROM STRING
+//	named_arg := IDENT '=' (NUMBER | STRING | IDENT)
+//
+// Recognised named args: depth=N, edge='type' (alias type='type'),
+// direction=forward|reverse|both. Unknown keys are rejected; this
+// keeps typo'd queries loud rather than silently producing wrong
+// results.
+func (p *parser) parseTraverse() (*TraverseExpr, error) {
+	p.advance() // consume "traverse"
+	expr, err := p.parseTraverseArgList()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.parseTraverseFrom(expr); err != nil {
+		return nil, err
+	}
+	if expr.Direction == "" {
+		expr.Direction = "forward"
+	}
+	return expr, nil
+}
+
+// parseTraverseArgList consumes the "(edge_name [, named_arg]...)" arg
+// block of a TRAVERSE expression and returns a partially-populated
+// TraverseExpr (StartKey/Direction set later by parseTraverseFrom).
+func (p *parser) parseTraverseArgList() (*TraverseExpr, error) {
+	if p.atEnd() || p.current().Type != TokenLeftParen {
+		return nil, p.syntaxErr("expected '(' after TRAVERSE")
+	}
+	p.advance() // consume '('
+
+	if p.atEnd() || p.current().Type != TokenIdent {
+		return nil, p.syntaxErr("expected edge collection name as first TRAVERSE argument")
+	}
+	expr := &TraverseExpr{EdgeName: p.current().Literal}
+	p.advance()
+
+	for !p.atEnd() && p.current().Type == TokenComma {
+		p.advance()
+		if err := p.parseTraverseNamedArg(expr); err != nil {
+			return nil, err
+		}
+	}
+
+	if p.atEnd() || p.current().Type != TokenRightParen {
+		return nil, p.syntaxErr("expected ')' or ',' inside TRAVERSE argument list")
+	}
+	p.advance()
+	return expr, nil
+}
+
+// parseTraverseFrom consumes "FROM '<startkey>'" and stores the start
+// key on expr.
+func (p *parser) parseTraverseFrom(expr *TraverseExpr) error {
+	if p.atEnd() || p.current().Type != TokenIdent ||
+		strings.ToLower(p.current().Literal) != "from" {
+		return p.syntaxErr("expected FROM after TRAVERSE(...)")
+	}
+	p.advance()
+	if p.atEnd() || p.current().Type != TokenString {
+		return p.syntaxErr("expected quoted start-key after TRAVERSE(...) FROM")
+	}
+	if p.current().Literal == "" {
+		return p.syntaxErr("TRAVERSE FROM requires a non-empty start key")
+	}
+	expr.StartKey = p.current().Literal
+	p.advance()
+	return nil
+}
+
+// parseTraverseNamedArg parses one IDENT '=' VALUE pair inside the
+// TRAVERSE arg list and applies it to expr.
+func (p *parser) parseTraverseNamedArg(expr *TraverseExpr) error {
+	if p.atEnd() || p.current().Type != TokenIdent {
+		return p.syntaxErr("expected named TRAVERSE argument")
+	}
+	key := strings.ToLower(p.current().Literal)
+	p.advance()
+	if p.atEnd() || p.current().Type != TokenEq {
+		return p.syntaxErr(fmt.Sprintf("expected '=' after %q in TRAVERSE", key))
+	}
+	p.advance()
+	if p.atEnd() {
+		return p.syntaxErr(fmt.Sprintf("expected value after %q= in TRAVERSE", key))
+	}
+	val := p.current()
+	p.advance()
+
+	switch key {
+	case "depth":
+		if val.Type != TokenNumber {
+			return p.syntaxErr("TRAVERSE depth= expects a number")
+		}
+		n, err := strconv.Atoi(val.Literal)
+		if err != nil || n < 0 {
+			return p.syntaxErr(fmt.Sprintf("TRAVERSE depth= must be a non-negative integer, got %q", val.Literal))
+		}
+		expr.Depth = n
+	case "edge", "type":
+		if val.Type != TokenString {
+			return p.syntaxErr(fmt.Sprintf("TRAVERSE %s= expects a quoted string", key))
+		}
+		expr.EdgeType = val.Literal
+	case "direction":
+		var lit string
+		switch val.Type {
+		case TokenIdent, TokenString:
+			lit = strings.ToLower(val.Literal)
+		default:
+			return p.syntaxErr("TRAVERSE direction= expects an identifier or string")
+		}
+		switch lit {
+		case "forward", "reverse", "both":
+			expr.Direction = lit
+		default:
+			return p.syntaxErr(fmt.Sprintf("TRAVERSE direction= must be forward|reverse|both, got %q", lit))
+		}
+	default:
+		return p.syntaxErr(fmt.Sprintf("unknown TRAVERSE argument %q", key))
+	}
+	return nil
+}
+
 // parseAsOfTimestamp accepts RFC3339, RFC3339 with nanosecond
 // precision, or a plain "YYYY-MM-DD" date. Other formats are rejected.
 func parseAsOfTimestamp(s string) (time.Time, error) {
@@ -148,6 +278,16 @@ func parseAsOfTimestamp(s string) (time.Time, error) {
 
 func (p *parser) parseWhere() (*WhereClause, error) {
 	p.advance() // skip "where"
+
+	// TRAVERSE special form: WHERE TRAVERSE(args) FROM '<startkey>'.
+	if !p.atEnd() && p.current().Type == TokenIdent &&
+		strings.ToLower(p.current().Literal) == "traverse" {
+		traverse, err := p.parseTraverse()
+		if err != nil {
+			return nil, err
+		}
+		return &WhereClause{Traverse: traverse}, nil
+	}
 
 	wc := &WhereClause{}
 	cond, err := p.parseCondition()

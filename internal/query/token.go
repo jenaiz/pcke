@@ -19,6 +19,11 @@ const (
 	TokenGte // >=
 	TokenLte // <=
 	TokenDot // .
+
+	// Punctuation introduced by F12.T4.2 for TRAVERSE(...) argument lists.
+	TokenLeftParen  // (
+	TokenRightParen // )
+	TokenComma      // ,
 )
 
 // Token represents a single lexical token produced by the lexer.
@@ -58,6 +63,12 @@ func (tt TokenType) String() string {
 		return "LTE"
 	case TokenDot:
 		return "DOT"
+	case TokenLeftParen:
+		return "LPAREN"
+	case TokenRightParen:
+		return "RPAREN"
+	case TokenComma:
+		return "COMMA"
 	default:
 		return fmt.Sprintf("TokenType(%d)", int(tt))
 	}

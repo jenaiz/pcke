@@ -18,11 +18,50 @@ type Query struct {
 	AsOf *time.Time
 }
 
-// WhereClause represents the WHERE part of a query. Conditions are joined by
-// logical operators (AND/OR). Operators[i] joins Conditions[i] and Conditions[i+1].
+// WhereClause represents the WHERE part of a query.
+//
+// Two mutually-exclusive forms:
+//
+//   - Conditions + Operators: classic field-op-value predicates joined
+//     by AND/OR. Operators[i] joins Conditions[i] and Conditions[i+1].
+//   - Traverse: a graph-traversal restriction on the candidate set.
+//     When Traverse != nil, Conditions is empty.
+//
+// Combining the two (TRAVERSE plus filter conditions) is intentionally
+// out of scope for v0.10.0; the parser rejects mixed forms with
+// ErrSyntax. Future work can lift the restriction by treating Traverse
+// as one extra implicit condition AND'd with the others.
 type WhereClause struct {
 	Conditions []Condition
 	Operators  []LogicalOp // len(Operators) == len(Conditions) - 1
+	Traverse   *TraverseExpr
+}
+
+// TraverseExpr is the parsed form of WHERE TRAVERSE(...) FROM '<startkey>'.
+//
+// Surface-level support only in F12.T4.2 — the executor wires the
+// expression to the graph package in F12.T4.3.
+type TraverseExpr struct {
+	// StartKey is the typed reference the traversal begins at, taken
+	// from the FROM '<key>' literal (e.g. "e:internal/kdb/db.go").
+	StartKey string
+
+	// EdgeName is the positional first argument inside the parens. We
+	// accept any identifier ("edges", "rel", "links", ...) for forward-
+	// compatibility but treat it opaquely; the typed-event log already
+	// stores edges in a single namespace.
+	EdgeName string
+
+	// Depth is the MaxDepth bound. Zero (the default) is mapped to
+	// graph.DefaultMaxDepth by the executor.
+	Depth int
+
+	// EdgeType is the inclusion filter. Empty = all edge types.
+	EdgeType string
+
+	// Direction is "forward", "reverse", or "both". Empty = "forward"
+	// by convention; the executor maps to graph.Direction.
+	Direction string
 }
 
 // LogicalOp is a logical conjunction between conditions.

@@ -50,6 +50,12 @@ func (l *Lexer) scanToken() error {
 		l.readAngleBracket(TokenLt, "<", TokenLte, "<=")
 	case ch == '.':
 		l.emit(TokenDot, ".")
+	case ch == '(':
+		l.emit(TokenLeftParen, "(")
+	case ch == ')':
+		l.emit(TokenRightParen, ")")
+	case ch == ',':
+		l.emit(TokenComma, ",")
 	case isLetter(ch) || ch == '_':
 		l.readIdent()
 	default:
