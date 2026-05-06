@@ -127,6 +127,11 @@ type Scanner struct {
 	root string // Repository root directory.
 	deep bool   // Enable AST-based deep analysis.
 	astP *ast.Parser
+
+	// historyCache holds per-file git stats for the current scan.
+	// Populated once at the start of Scan via AllFileHistory; consulted
+	// per file by enrichWithGit. Nil between scans.
+	historyCache map[string]FileStats
 }
 
 // NewScanner creates a [Scanner] for the repository at root, persisting
@@ -169,6 +174,16 @@ func (s *Scanner) Scan(ctx context.Context, full bool) (*ScanResult, error) {
 	if s.astP != nil {
 		defer s.astP.Close()
 	}
+
+	// Build the per-scan history cache once, up front. enrichWithGit
+	// consults it per file in O(1) instead of walking the commit DAG
+	// per file (which is O(all-commits) under go-git's --follow path).
+	if s.git != nil {
+		if cache, err := s.git.AllFileHistory(); err == nil {
+			s.historyCache = cache
+		}
+	}
+	defer func() { s.historyCache = nil }()
 
 	headHash, err := s.git.HeadHash()
 	if err != nil {
@@ -550,13 +565,19 @@ func (s *Scanner) deepAnalyse(ctx context.Context, node *KnowledgeNode, relPath 
 	result.EntitiesExtracted += len(parsed.Entities)
 }
 
-// enrichWithGit adds git-derived stats to a node.
+// enrichWithGit adds git-derived stats to a node, looking up from the
+// per-scan history cache rather than walking the commit DAG per file.
+//
+// The cache is populated once at the start of each scan via
+// AllFileHistory; missing entries are treated as zero-stats (file was
+// not touched within the history window).
 func (s *Scanner) enrichWithGit(node *KnowledgeNode, relPath string) {
-	stats, err := s.git.FileHistory(relPath)
-	if err != nil {
-		return // Non-fatal: proceed without git enrichment.
+	if s.historyCache == nil {
+		return
 	}
-	node.Stability = stats.Stability
+	if stats, ok := s.historyCache[relPath]; ok {
+		node.Stability = stats.Stability
+	}
 }
 
 // loadExistingNodes reads all knowledge nodes from the database.

@@ -51,21 +51,126 @@ func (g *GitIntel) CurrentBranch() string {
 	return name.Short()
 }
 
+// historyWindowDays is the lookback window FileHistory walks when
+// computing per-file git statistics.
+//
+// The previous implementation iterated the entire commit history per
+// file, which is O(commits × files) under go-git's --follow semantics
+// and scales poorly: on PCKE's own repo TestScannerFullScan crossed
+// the 10-minute test timeout once the branch grew past ~50 commits.
+// Bounding the window keeps the scan deterministic-time without
+// changing the meaning of "stable file" — files with no recent activity
+// are still surfaced as such; ancient cold history rarely changes the
+// answer.
+const historyWindowDays = 90
+
 // FileStats holds per-file git statistics.
+//
+// Both commit counts cover the [now-historyWindowDays, now] window. The
+// older "TotalCommits = all commits ever" semantic was retired together
+// with the unbounded scan; downstream consumers (the Stability metric
+// and onboarding aggregates) only care about recent churn.
 type FileStats struct {
-	TotalCommits   int
-	RecentCommits  int // Commits in the last 90 days.
-	Stability      float64
+	TotalCommits   int     // commits within the history window
+	RecentCommits  int     // same as TotalCommits in the windowed implementation
+	Stability      float64 // 1.0 = no churn, 0.0 = ≥ stabilityChurnSaturation commits in window
 	LastAuthor     string
 	LastChangeType string
 	LastCommitTime time.Time
 }
 
+// stabilityChurnSaturation is the number of in-window commits at which
+// Stability hits 0. Anything between 0 and this scales linearly.
+const stabilityChurnSaturation = 10
+
+// fileHistoryMaxIter caps the number of commits FileHistory walks per
+// file. go-git's LogOptions{FileName: ...} uses --follow semantics that
+// scan the whole history checking each commit's diff against parent.
+// Without a cap, that is O(all-commits) per file even when the Since
+// filter restricts output. The cap turns it into O(min(cap, commits-
+// to-touch-this-file)) and bounds full-scan time.
+//
+// Once the cap is hit, FileHistory returns the partial stats it
+// gathered and sets Stability to 0 (treat capped files as high-churn:
+// any file touched by ≥cap commits in 90 days is, by definition, busy).
+const fileHistoryMaxIter = 50
+
+// AllFileHistory returns FileStats keyed by repository-relative path
+// for every file touched within the last historyWindowDays.
+//
+// Implementation: one pass over the commit DAG (filtered by Since) +
+// per-commit diff vs first parent. Each commit's diff is O(changed
+// files for that commit), so the total cost is O(commits-in-window ×
+// avg-files-per-commit) — much cheaper than calling FileHistory per
+// file (each of those walks the full DAG).
+//
+// Files absent from the returned map have no commits in the window.
+// Treat absence as zero-stats.
+//
+// LastAuthor / LastCommitTime / LastChangeType reflect the most recent
+// commit that touched a given file (the iterator yields commits in
+// reverse chronological order from HEAD, so the first visit per file
+// is the most recent).
+func (g *GitIntel) AllFileHistory() (map[string]FileStats, error) {
+	cutoff := time.Now().AddDate(0, 0, -historyWindowDays)
+	iter, err := g.repo.Log(&git.LogOptions{Since: &cutoff})
+	if err != nil {
+		return nil, fmt.Errorf("git log (all-file): %w", err)
+	}
+	defer iter.Close()
+
+	out := make(map[string]FileStats)
+	if err := iter.ForEach(func(c *object.Commit) error {
+		fileStats, err := c.Stats()
+		if err != nil {
+			// Root commits and a few edge cases can fail Stats();
+			// skip rather than abort the whole aggregation.
+			return nil
+		}
+		for _, fs := range fileStats {
+			entry := out[fs.Name]
+			entry.TotalCommits++
+			entry.RecentCommits++
+			if entry.TotalCommits == 1 {
+				entry.LastAuthor = c.Author.Name
+				entry.LastCommitTime = c.Author.When
+				entry.LastChangeType = parseChangeType(c.Message)
+			}
+			out[fs.Name] = entry
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("iterate log (all-file): %w", err)
+	}
+
+	for path, entry := range out {
+		entry.Stability = 1.0 - float64(entry.RecentCommits)/float64(stabilityChurnSaturation)
+		if entry.Stability < 0 {
+			entry.Stability = 0
+		}
+		if entry.Stability > 1 {
+			entry.Stability = 1
+		}
+		out[path] = entry
+	}
+	return out, nil
+}
+
 // FileHistory returns [FileStats] for the given file path. The path
 // should be relative to the repository root, using forward slashes.
+//
+// Iteration is bounded by:
+//
+//   - LogOptions.Since (the historyWindowDays cutoff) — go-git filters
+//     output to commits within the window.
+//   - fileHistoryMaxIter — early-exits the iteration once enough
+//     commits are seen, capping per-file work even when the underlying
+//     walk is slow.
 func (g *GitIntel) FileHistory(relPath string) (FileStats, error) {
+	cutoff := time.Now().AddDate(0, 0, -historyWindowDays)
 	logOpts := &git.LogOptions{
 		FileName: &relPath,
+		Since:    &cutoff,
 	}
 	iter, err := g.repo.Log(logOpts)
 	if err != nil {
@@ -73,31 +178,39 @@ func (g *GitIntel) FileHistory(relPath string) (FileStats, error) {
 	}
 	defer iter.Close()
 
-	cutoff := time.Now().AddDate(0, 0, -90)
 	var stats FileStats
-
+	capped := false
 	if err := iter.ForEach(func(c *object.Commit) error {
 		stats.TotalCommits++
-		if c.Author.When.After(cutoff) {
-			stats.RecentCommits++
-		}
+		stats.RecentCommits++
 		if stats.TotalCommits == 1 {
 			stats.LastAuthor = c.Author.Name
 			stats.LastCommitTime = c.Author.When
 			stats.LastChangeType = parseChangeType(c.Message)
 		}
+		if stats.TotalCommits >= fileHistoryMaxIter {
+			capped = true
+			return errStopIter
+		}
 		return nil
-	}); err != nil {
+	}); err != nil && err != errStopIter {
 		return FileStats{}, fmt.Errorf("iterate log %s: %w", relPath, err)
 	}
 
-	if stats.TotalCommits > 0 {
-		stats.Stability = 1.0 - float64(stats.RecentCommits)/float64(max(stats.TotalCommits, 1))
-		if stats.Stability < 0 {
-			stats.Stability = 0
-		}
+	if capped {
+		// Capped files are treated as fully unstable: they have at least
+		// fileHistoryMaxIter commits in the window, well past the
+		// stabilityChurnSaturation threshold.
+		stats.Stability = 0
+		return stats, nil
 	}
-
+	stats.Stability = 1.0 - float64(stats.RecentCommits)/float64(stabilityChurnSaturation)
+	if stats.Stability < 0 {
+		stats.Stability = 0
+	}
+	if stats.Stability > 1 {
+		stats.Stability = 1
+	}
 	return stats, nil
 }
 
