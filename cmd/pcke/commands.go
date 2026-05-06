@@ -1208,6 +1208,9 @@ func registerMigrations(e *migrate.Engine) {
 	// v12 — F12.T6: translate legacy rel: relation records into typed
 	// Link (l:) events with paired reverse-index (lr:) records.
 	e.Register(migrate.V0012MigrateRelToL())
+	// v13 — F12.T6: translate legacy nt: note records into typed
+	// Decision (d:) events with severity=should, scope=global, source=manual.
+	e.Register(migrate.V0013MigrateNtToD())
 }
 
 // configGet returns the value of a dotted config key (e.g. "scan.redact_secrets").
