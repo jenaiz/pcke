@@ -1,5 +1,7 @@
 package query
 
+import "time"
+
 // Query represents a parsed DSL query. It is the root AST node produced by
 // the parser and consumed by the type checker and planner.
 type Query struct {
@@ -7,6 +9,13 @@ type Query struct {
 	Where      *WhereClause // nil if no WHERE clause
 	OrderBy    *OrderClause // nil if no ORDER BY clause
 	Limit      int          // 0 means no limit
+
+	// AsOf, if non-nil, pins the query to a specific point in time.
+	// Reads return the version of every record that was active at AsOf;
+	// records created after AsOf are excluded. Surface-level support
+	// only in this commit — the executor wires AsOf to event.Store.AsOf
+	// in F12.T4 commit 3. See PRD v5.2 §3.5.
+	AsOf *time.Time
 }
 
 // WhereClause represents the WHERE part of a query. Conditions are joined by

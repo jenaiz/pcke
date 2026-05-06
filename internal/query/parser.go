@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Parse parses a pcke query DSL string into a Query AST. Returns ErrSyntax
@@ -26,55 +27,123 @@ type parser struct {
 func (p *parser) parse() (*Query, error) {
 	q := &Query{}
 
-	// collection
 	coll, err := p.expectIdent()
 	if err != nil {
 		return nil, fmt.Errorf("%w: expected collection name", ErrSyntax)
 	}
-
 	coll = strings.ToLower(coll)
 	if !isCollection(coll) {
 		return nil, fmt.Errorf("%w: unknown collection %q", ErrUnknownCollection, coll)
 	}
 	q.Collection = coll
 
-	// optional clauses
 	for !p.atEnd() {
-		kw := strings.ToLower(p.current().Literal)
-		switch kw {
-		case "where":
-			if q.Where != nil {
-				return nil, p.syntaxErr("duplicate WHERE clause")
-			}
-			wc, err := p.parseWhere()
-			if err != nil {
-				return nil, err
-			}
-			q.Where = wc
-		case "order":
-			if q.OrderBy != nil {
-				return nil, p.syntaxErr("duplicate ORDER BY clause")
-			}
-			oc, err := p.parseOrderBy()
-			if err != nil {
-				return nil, err
-			}
-			q.OrderBy = oc
-		case "limit":
-			if q.Limit != 0 {
-				return nil, p.syntaxErr("duplicate LIMIT clause")
-			}
-			lim, err := p.parseLimit()
-			if err != nil {
-				return nil, err
-			}
-			q.Limit = lim
-		default:
-			return nil, p.syntaxErr(fmt.Sprintf("unexpected token %q", p.current().Literal))
+		if err := p.parseClause(q); err != nil {
+			return nil, err
 		}
 	}
-
 	return q, nil
+}
+
+// parseClause consumes one optional top-level clause (WHERE, ORDER BY,
+// LIMIT, AS OF) and stores it on q. Returns an error if the lookahead
+// token is not a recognised clause keyword or if the clause is duplicated.
+func (p *parser) parseClause(q *Query) error {
+	kw := strings.ToLower(p.current().Literal)
+	switch kw {
+	case "where":
+		if q.Where != nil {
+			return p.syntaxErr("duplicate WHERE clause")
+		}
+		wc, err := p.parseWhere()
+		if err != nil {
+			return err
+		}
+		q.Where = wc
+	case "order":
+		if q.OrderBy != nil {
+			return p.syntaxErr("duplicate ORDER BY clause")
+		}
+		oc, err := p.parseOrderBy()
+		if err != nil {
+			return err
+		}
+		q.OrderBy = oc
+	case "limit":
+		if q.Limit != 0 {
+			return p.syntaxErr("duplicate LIMIT clause")
+		}
+		lim, err := p.parseLimit()
+		if err != nil {
+			return err
+		}
+		q.Limit = lim
+	case "as":
+		if q.AsOf != nil {
+			return p.syntaxErr("duplicate AS OF clause")
+		}
+		at, err := p.parseAsOf()
+		if err != nil {
+			return err
+		}
+		q.AsOf = at
+	default:
+		return p.syntaxErr(fmt.Sprintf("unexpected token %q", p.current().Literal))
+	}
+	return nil
+}
+
+// parseAsOf parses the "AS OF '<rfc3339-timestamp>'" clause. The "AS"
+// token has already been peeked by the dispatch loop; this function
+// consumes it together with the "OF" keyword and the timestamp literal.
+//
+// AS OF pins the query to a moment in time: every record-producing read
+// returns the version that was active at the supplied timestamp.
+//
+// Surface-level support only in F12.T4 commit 1 — the executor wires
+// the value to event.Store.AsOf in F12.T4 commit 3.
+func (p *parser) parseAsOf() (*time.Time, error) {
+	p.advance() // consume "as"
+
+	if p.atEnd() {
+		return nil, p.syntaxErr("expected OF after AS")
+	}
+	of := p.current()
+	if of.Type != TokenIdent || strings.ToLower(of.Literal) != "of" {
+		return nil, p.syntaxErr(fmt.Sprintf("expected OF after AS, got %q", of.Literal))
+	}
+	p.advance()
+
+	if p.atEnd() {
+		return nil, p.syntaxErr("expected timestamp literal after AS OF")
+	}
+	tok := p.current()
+	if tok.Type != TokenString {
+		return nil, p.syntaxErr(fmt.Sprintf("expected quoted timestamp after AS OF, got %q", tok.Literal))
+	}
+	p.advance()
+
+	parsed, err := parseAsOfTimestamp(tok.Literal)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrSyntax, err)
+	}
+	return &parsed, nil
+}
+
+// parseAsOfTimestamp accepts RFC3339, RFC3339 with nanosecond
+// precision, or a plain "YYYY-MM-DD" date. Other formats are rejected.
+func parseAsOfTimestamp(s string) (time.Time, error) {
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02",
+	}
+	for _, layout := range formats {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid AS OF timestamp %q (want RFC3339 or YYYY-MM-DD)", s)
 }
 
 func (p *parser) parseWhere() (*WhereClause, error) {
