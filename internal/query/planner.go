@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Strategy describes the access method the planner selects for a query.
@@ -47,6 +48,19 @@ type Plan struct {
 	Operators  []LogicalOp // logical ops between filters
 	OrderBy    *OrderClause
 	Limit      int
+
+	// Traverse, if non-nil, switches the executor to graph-traversal
+	// mode: results are the refs reachable from Traverse.StartKey under
+	// the configured options. When set, Filters/Operators are ignored
+	// (mutual exclusion is enforced by the parser).
+	Traverse *TraverseExpr
+
+	// AsOf, if non-nil, pins the query to a moment in time. When
+	// combined with Traverse, it propagates to the graph package's
+	// AsOf option. Without Traverse it currently surfaces as a
+	// "not yet supported in executor" error — record-by-record AS OF
+	// queries land in v0.11+.
+	AsOf *time.Time
 }
 
 // indexedFields maps (collection, field) to the secondary index name.
@@ -75,9 +89,17 @@ func BuildPlan(q *Query) *Plan {
 		Strategy:   FullScan,
 		OrderBy:    q.OrderBy,
 		Limit:      q.Limit,
+		AsOf:       q.AsOf,
 	}
 
 	if q.Where == nil {
+		return plan
+	}
+
+	// TRAVERSE switches the executor into graph mode; the rest of the
+	// plan (filters, indexes) is unused in that path.
+	if q.Where.Traverse != nil {
+		plan.Traverse = q.Where.Traverse
 		return plan
 	}
 

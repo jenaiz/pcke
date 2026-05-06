@@ -4,14 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/event"
+	"github.com/jenaiz/pcke/internal/kdb/graph"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
+
+// ErrAsOfNotSupported is returned when a query uses AS OF without
+// TRAVERSE. Time-pinning over the legacy collections (kn:/rel:/nt:/el:)
+// requires reading the typed-event log, which the executor does not yet
+// do for non-graph queries. Graph queries (TRAVERSE) honour AS OF
+// natively via the graph package.
+var ErrAsOfNotSupported = errors.New("query: AS OF without TRAVERSE not yet supported by the executor (track v0.11+)")
 
 // Row represents a single query result as a generic key-value map.
 // Keys are field names from the collection schema.
@@ -59,9 +70,22 @@ func CollectionPrefix(collection string) string {
 // Execute runs a query plan against the database and returns matching rows.
 // The plan must have been produced by BuildPlan on a type-checked query.
 //
-// The executor uses cursor-based prefix scanning within a snapshot-isolated
-// View transaction, applying filters, sorting, and LIMIT post-scan.
+// Three execution modes:
+//
+//   - Graph mode (plan.Traverse != nil): runs graph.Reachable and returns
+//     reachable refs as rows. AS OF on the plan is propagated.
+//   - Time-pinned scan (plan.AsOf != nil, plan.Traverse == nil): not yet
+//     supported by the executor; returns ErrAsOfNotSupported.
+//   - Classic mode (default): cursor-based prefix scan inside a View
+//     transaction, applying filters, sorting, and LIMIT post-scan.
 func Execute(ctx context.Context, db *kdb.DB, plan *Plan) (*ResultSet, error) {
+	if plan.Traverse != nil {
+		return executeTraverse(ctx, db, plan)
+	}
+	if plan.AsOf != nil {
+		return nil, ErrAsOfNotSupported
+	}
+
 	mu.RLock()
 	prefix, ok := collectionPrefixes[plan.Collection]
 	mu.RUnlock()
@@ -79,19 +103,88 @@ func Execute(ctx context.Context, db *kdb.DB, plan *Plan) (*ResultSet, error) {
 		return nil, fmt.Errorf("query: execute: %w", err)
 	}
 
-	// Sort if needed. Sorting happens outside the transaction to minimize
-	// the time spent holding the snapshot.
 	if plan.OrderBy != nil {
 		sortRows(rows, plan.OrderBy)
 	}
 
-	// Apply limit after sorting.
 	if plan.Limit > 0 && len(rows) > plan.Limit {
 		rows = rows[:plan.Limit]
 	}
 
 	return &ResultSet{Collection: plan.Collection, Rows: rows}, nil
 }
+
+// executeTraverse runs a TRAVERSE query against the graph package and
+// returns reachable refs as rows. Each row carries the typed reference
+// in both "id" (legacy field name from classic kn: rows) and "ref"
+// (the new typed-reference name) so downstream consumers can pick
+// either form.
+//
+// In v0.10.0 the row payload is intentionally minimal — just the ref.
+// Hydrating the full event record per ref is deferred to T7 (CLI) /
+// T8 (benchmark + docs) so the graph foundation isn't blocked on
+// schema-mapping work.
+func executeTraverse(ctx context.Context, db *kdb.DB, plan *Plan) (*ResultSet, error) {
+	opts := graphOptionsFromTraverse(plan.Traverse, plan.AsOf)
+	refs, err := graph.Reachable(ctx, db, graph.Ref(plan.Traverse.StartKey), opts)
+	if err != nil && !errors.Is(err, graph.ErrVisitedCapExceeded) {
+		return nil, fmt.Errorf("query: traverse: %w", err)
+	}
+
+	rows := make([]Row, 0, len(refs))
+	for _, r := range refs {
+		rows = append(rows, Row{
+			"id":  string(r),
+			"ref": string(r),
+		})
+	}
+
+	if plan.OrderBy != nil {
+		sortRows(rows, plan.OrderBy)
+	}
+	if plan.Limit > 0 && len(rows) > plan.Limit {
+		rows = rows[:plan.Limit]
+	}
+
+	rs := &ResultSet{Collection: plan.Collection, Rows: rows}
+	if errors.Is(err, graph.ErrVisitedCapExceeded) {
+		// Surface the partial-result signal so callers can decide whether
+		// to retry with a higher cap; the rows already in rs are the
+		// partial set graph.Reachable accumulated before bailing.
+		return rs, fmt.Errorf("query: traverse: %w", err)
+	}
+	return rs, nil
+}
+
+// graphOptionsFromTraverse maps the parsed DSL TraverseExpr (plus
+// optional AsOf) onto graph.TraversalOptions.
+func graphOptionsFromTraverse(t *TraverseExpr, asOf *time.Time) graph.TraversalOptions {
+	opts := graph.TraversalOptions{
+		MaxDepth:  t.Depth,
+		Direction: graphDirectionFromString(t.Direction),
+		AsOf:      asOf,
+	}
+	if t.EdgeType != "" {
+		opts.EdgeTypes = []string{t.EdgeType}
+	}
+	return opts
+}
+
+func graphDirectionFromString(s string) graph.Direction {
+	switch strings.ToLower(s) {
+	case "reverse":
+		return graph.Reverse
+	case "both":
+		return graph.Both
+	default:
+		return graph.Forward
+	}
+}
+
+// suppress unused imports if the unused helpers vanish during refactor.
+var (
+	_ = event.New // event package wired now; future PRs will use it for hydration
+)
 
 // scanCollection iterates over all records with the given prefix, deserializes
 // them, and applies the plan's filter conditions.
