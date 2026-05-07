@@ -66,6 +66,9 @@ func newRootCmd() *cobra.Command {
 		newShellCmd(),
 		newOnboardCmd(),
 		newFederationCmd(),
+		newGraphCmd(),
+		newDecisionCmd(),
+		newHistoryCmd(),
 	)
 
 	return root
