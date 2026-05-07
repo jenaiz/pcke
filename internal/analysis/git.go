@@ -9,6 +9,8 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+
+	"github.com/jenaiz/pcke/internal/analysis/decisions"
 )
 
 // GitIntel extracts intelligence from a git repository.
@@ -94,6 +96,39 @@ const stabilityChurnSaturation = 10
 // gathered and sets Stability to 0 (treat capped files as high-churn:
 // any file touched by ≥cap commits in 90 days is, by definition, busy).
 const fileHistoryMaxIter = 50
+
+// RecentCommits returns commits authored within the last
+// historyWindowDays for the decisions package to scan for
+// "(decision|adr|rfc):" markers. The cap (fileHistoryMaxIter) is
+// reused as a hard ceiling so a runaway repo cannot OOM the scanner
+// during backfill.
+func (g *GitIntel) RecentCommits() ([]decisions.CommitInfo, error) {
+	cutoff := time.Now().AddDate(0, 0, -historyWindowDays)
+	iter, err := g.repo.Log(&git.LogOptions{Since: &cutoff})
+	if err != nil {
+		return nil, fmt.Errorf("git log (recent): %w", err)
+	}
+	defer iter.Close()
+
+	var out []decisions.CommitInfo
+	if err := iter.ForEach(func(c *object.Commit) error {
+		out = append(out, decisions.CommitInfo{
+			Hash:    c.Hash.String(),
+			Author:  c.Author.Name,
+			Time:    c.Author.When,
+			Message: c.Message,
+		})
+		if len(out) >= fileHistoryMaxIter*4 {
+			// Hard ceiling: even within the window, cap at 4× the per-
+			// file iter cap so the backfill stays fast on busy repos.
+			return errStopIter
+		}
+		return nil
+	}); err != nil && err != errStopIter {
+		return nil, fmt.Errorf("iterate commits (recent): %w", err)
+	}
+	return out, nil
+}
 
 // AllFileHistory returns FileStats keyed by repository-relative path
 // for every file touched within the last historyWindowDays.

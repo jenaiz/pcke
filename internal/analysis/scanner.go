@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jenaiz/pcke/internal/analysis/ast"
+	"github.com/jenaiz/pcke/internal/analysis/decisions"
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/index"
@@ -84,6 +85,12 @@ type ScanResult struct {
 	RelationsCreated  int
 	CommitHash        string
 	Duration          time.Duration
+
+	// Decisions records how many Decision events the scan-time backfill
+	// wrote per source. Empty when the backfill was skipped (e.g. on a
+	// repo with no docs/adr, no @pcke-rule annotations, and no
+	// matching commit messages).
+	Decisions decisions.Result
 }
 
 // CheckBranchMismatch reads the stored scan branch from the knowledge base
@@ -230,6 +237,18 @@ func (s *Scanner) Scan(ctx context.Context, full bool) (*ScanResult, error) {
 		if err := s.persistRenames(ctx, renames); err != nil {
 			return nil, fmt.Errorf("analysis: persist renames: %w", err)
 		}
+	}
+
+	// Decision backfill: harvest ADRs, @pcke-rule annotations, and
+	// commit-message decision markers into the typed-event log so
+	// graph queries return populated d: records on day one.
+	// Backfill failures are non-fatal: the scan succeeded, the
+	// backfill is best-effort enrichment.
+	if r, err := decisions.BackfillAll(ctx, s.db, s.root, s.git); err != nil {
+		// Surface partial counts even on error so the result is honest.
+		result.Decisions = r
+	} else {
+		result.Decisions = r
 	}
 
 	result.Duration = time.Since(start)
