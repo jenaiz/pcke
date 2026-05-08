@@ -1,6 +1,6 @@
 # pcke — Project Context & Knowledge Engine
 
-> **Status: v0.9.1 — pre-1.0 pivot in progress.** The pivot is ratified by
+> **Status: v0.10.0 — graph foundation shipped.** The pivot is ratified by
 > [ADR-0008](docs/adr/0008-context-graph-pivot.md) (amended by
 > [ADR-0009](docs/adr/0009-durable-memory-corrections.md)). The first stable
 > release is `v1.0.0` after Phase 15.
@@ -226,9 +226,9 @@ cd /path/to/your-project
 | v0.7.0 | 6 | Onboarding | DONE (retag) |
 | v0.8.0 | 7 | Schema Evolution | DONE (retag) |
 | v0.9.0 | 8 | Federation (**deprecated**) | DONE (retag) |
-| **v0.9.1** | 11 | **Pivot Reset** | **CURRENT** |
-| v0.10.0 | 12 | Memory Schema + Graph | next |
-| v0.11.0 | 13 | Subgraph Retrieval | planned |
+| v0.9.1 | 11 | Pivot Reset | DONE |
+| **v0.10.0** | 12 | **Graph Foundation** | **CURRENT** — typed-event log, graph traversal, TRAVERSE/AS OF DSL, `pcke graph`/`decision`/`history` CLI |
+| v0.11.0 | 13 | Subgraph Retrieval | next |
 | v0.12.0 | 14 | Durable Sessions | planned |
 | v0.13.0 | 15 | Workflow Awareness | planned |
 | **v1.0.0** | — | **Stable release: Durable Code Memory** | target |
