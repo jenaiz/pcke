@@ -1,0 +1,283 @@
+package retrieval
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/event"
+	"github.com/jenaiz/pcke/internal/kdb/graph"
+)
+
+// defaultMaxDepth is the BFS hop count Assemble passes to graph.Reachable
+// when the caller doesn't override it. Two hops captures direct
+// dependencies and their immediate connections, which is the typical
+// "context for an open file" expectation.
+const defaultMaxDepth = 2
+
+// Engine assembles ranked, budget-bounded context for a Request by
+// traversing the typed-event graph and scoring each reachable record.
+//
+// Engines are cheap to construct and safe to share across goroutines:
+// every Assemble call uses its own kdb View transaction.
+type Engine struct {
+	db      *kdb.DB
+	weights Weights
+	now     func() time.Time
+}
+
+// Option configures an Engine.
+type Option func(*Engine)
+
+// WithWeights overrides the default scoring weights. Sums outside
+// [0.95, 1.05] are accepted but flagged as a Warning on every
+// returned ContextPackage.
+func WithWeights(w Weights) Option {
+	return func(e *Engine) { e.weights = w }
+}
+
+// WithClock injects a deterministic time source. Production callers
+// leave it unset and the engine uses time.Now.
+func WithClock(now func() time.Time) Option {
+	return func(e *Engine) { e.now = now }
+}
+
+// New constructs an Engine backed by db.
+func New(db *kdb.DB, opts ...Option) *Engine {
+	e := &Engine{
+		db:      db,
+		weights: DefaultWeights(),
+	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	if e.now == nil {
+		e.now = func() time.Time { return time.Now().UTC() }
+	}
+	return e
+}
+
+// Assemble builds a ranked, budget-bounded ContextPackage for req.
+//
+// Algorithm (PRD v5.2 §4.2):
+//
+//  1. For each file in the request, traverse the graph forward + reverse
+//     up to defaultMaxDepth hops. Collect every reachable ref plus the
+//     starting refs themselves.
+//  2. Resolve each ref via event.Store.Latest. Skip refs whose record
+//     is missing or fails to decode (best-effort; surface as a warning).
+//  3. Compute Score via the existing Score function with the engine's
+//     Weights and now.
+//  4. Materialise each event as a Section (Body shaped per event kind).
+//  5. Sort sections by descending Score (stable, so equal-score items
+//     keep their resolution order — typically alphabetical).
+//  6. Greedy-admit via FitToBudget; flag truncation.
+//  7. Return ContextPackage.
+//
+// Empty file set: Assemble returns an empty package with a warning
+// rather than scanning the entire event log. Global rankings without
+// a focus file are deferred to a future "global mode" (Phase 14+).
+func (e *Engine) Assemble(ctx context.Context, req Request) (*ContextPackage, error) {
+	pkg := &ContextPackage{
+		BudgetLimit: EffectiveBudget(req),
+	}
+
+	files := requestFiles(req)
+	if len(files) == 0 {
+		pkg.Warnings = append(pkg.Warnings,
+			"request has no FilePath or ChangedFiles; returning empty package")
+		return pkg, nil
+	}
+
+	if !nearlyOne(e.weights.Sum()) {
+		pkg.Warnings = append(pkg.Warnings,
+			fmt.Sprintf("weights sum to %.3f, not 1.0; scores may exceed [0, 1]", e.weights.Sum()))
+	}
+
+	refs, err := e.collectCandidateRefs(ctx, files)
+	if err != nil {
+		return pkg, fmt.Errorf("retrieval: collect candidates: %w", err)
+	}
+	if len(refs) == 0 {
+		pkg.Warnings = append(pkg.Warnings,
+			"graph traversal produced no candidates; the requested files may be unscanned")
+		return pkg, nil
+	}
+
+	sections, err := e.scoreAndShape(ctx, req, refs)
+	if err != nil {
+		return pkg, fmt.Errorf("retrieval: score: %w", err)
+	}
+	if len(sections) == 0 {
+		pkg.Warnings = append(pkg.Warnings,
+			"all candidates failed to resolve; the event log may be partially populated")
+		return pkg, nil
+	}
+
+	sort.SliceStable(sections, func(i, j int) bool {
+		return sections[i].Score > sections[j].Score
+	})
+
+	admitted, truncated := FitToBudget(sections, pkg.BudgetLimit)
+	pkg.Sections = admitted
+	pkg.Truncated = truncated
+	for _, s := range admitted {
+		pkg.TokensUsed += s.Tokens
+	}
+	return pkg, nil
+}
+
+// collectCandidateRefs traverses the graph from each file in both
+// directions, returning the union of reachable refs plus the starting
+// refs themselves (so the file's own Entity record is included).
+func (e *Engine) collectCandidateRefs(ctx context.Context, files []string) ([]graph.Ref, error) {
+	seen := make(map[graph.Ref]struct{})
+	var ordered []graph.Ref
+
+	add := func(r graph.Ref) {
+		if r == "" {
+			return
+		}
+		if _, dup := seen[r]; dup {
+			return
+		}
+		seen[r] = struct{}{}
+		ordered = append(ordered, r)
+	}
+
+	opts := graph.TraversalOptions{
+		Direction: graph.Both,
+		MaxDepth:  defaultMaxDepth,
+	}
+	for _, f := range files {
+		start := graph.Ref("e:" + f)
+		add(start)
+		reach, err := graph.Reachable(ctx, e.db, start, opts)
+		if err != nil && !errors.Is(err, graph.ErrVisitedCapExceeded) {
+			return nil, err
+		}
+		for _, r := range reach {
+			add(r)
+		}
+	}
+	return ordered, nil
+}
+
+// scoreAndShape resolves each candidate ref via event.Store.Latest,
+// scores it, and shapes a Section. Refs that fail to resolve are
+// silently skipped so a partially-populated event log doesn't block
+// retrieval; callers can detect emptiness via len(Sections) == 0.
+func (e *Engine) scoreAndShape(ctx context.Context, req Request, refs []graph.Ref) ([]Section, error) {
+	store := event.New(e.db)
+	now := e.now()
+	sections := make([]Section, 0, len(refs))
+
+	for _, ref := range refs {
+		kind, id, ok := splitRef(string(ref))
+		if !ok {
+			continue
+		}
+		evt, err := store.Latest(ctx, kind, id)
+		if err != nil {
+			if errors.Is(err, event.ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("latest %q: %w", ref, err)
+		}
+		s := shapeSection(evt, Score(now, req, evt, e.weights))
+		sections = append(sections, s)
+	}
+	return sections, nil
+}
+
+// shapeSection turns one event + its score into a Section, computing
+// the Body string shape per event kind (so budgeting reflects how
+// the agent will actually see the content).
+func shapeSection(evt event.Event, score float64) Section {
+	hdr := evt.Header()
+	body := bodyForEvent(evt)
+	return Section{
+		Ref:       refForEvent(evt),
+		Kind:      evt.Kind().String(),
+		Title:     titleForEvent(evt),
+		Body:      body,
+		Score:     score,
+		Tokens:    TokensFor(body),
+		CreatedAt: hdr.CreatedAt,
+	}
+}
+
+// titleForEvent returns the one-line label rendered above each
+// section in the agent's context.
+func titleForEvent(evt event.Event) string {
+	switch v := evt.(type) {
+	case *event.Entity:
+		if v.Path != "" {
+			return v.Path
+		}
+		return v.EID
+	case *event.Decision:
+		if v.Title != "" {
+			return v.Title
+		}
+		return v.DID
+	case *event.Link:
+		return fmt.Sprintf("%s --%s--> %s", v.SrcRef, v.EdgeType, v.DstRef)
+	default:
+		return string(refForEvent(evt))
+	}
+}
+
+// bodyForEvent returns the section payload that counts against the
+// budget. For entities we keep it tight (path + type/name); for
+// decisions we ship the full body since that's where the rationale
+// the agent needs lives.
+func bodyForEvent(evt event.Event) string {
+	switch v := evt.(type) {
+	case *event.Entity:
+		if v.Type == "" && v.Name == "" {
+			return v.Path
+		}
+		return fmt.Sprintf("%s: %s %s", v.Path, v.Type, v.Name)
+	case *event.Decision:
+		if v.Body != "" {
+			return v.Body
+		}
+		return v.Title
+	case *event.Link:
+		return fmt.Sprintf("%s --%s--> %s", v.SrcRef, v.EdgeType, v.DstRef)
+	default:
+		return ""
+	}
+}
+
+// splitRef parses "<prefix>:<id>" into (Kind, id). Returns ok=false for
+// unknown prefixes. Mirrors cmd/pcke.parseTypedRef but local so the
+// retrieval package doesn't depend on cmd/pcke.
+func splitRef(ref string) (event.Kind, string, bool) {
+	if len(ref) < 3 {
+		return 0, "", false
+	}
+	switch ref[:2] {
+	case "e:":
+		return event.KindEntity, ref[2:], true
+	case "d:":
+		return event.KindDecision, ref[2:], true
+	case "l:":
+		return event.KindLink, ref[2:], true
+	case "o:":
+		return event.KindObservation, ref[2:], true
+	case "x:":
+		return event.KindOutcome, ref[2:], true
+	default:
+		return 0, "", false
+	}
+}
+
+// nearlyOne reports whether x is within ±0.05 of 1.0.
+func nearlyOne(x float64) bool {
+	return x >= 0.95 && x <= 1.05
+}
