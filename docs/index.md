@@ -6,9 +6,10 @@ local knowledge base for AI assistants.
 ## Quick links
 
 - [Getting Started](getting-started.md) — install, scan, query
+- [Graph Guide](graph-guide.md) — worked examples for `pcke graph` / `decision` / `history` (v0.10+)
 - [Architecture](architecture.md) — system design, storage engine, concurrency
 - [API Reference](api-reference.md) — Go API surface
-- [Query Language](query-language.md) — DSL grammar and examples
+- [Query Language](query-language.md) — DSL grammar (TRAVERSE, AS OF) and examples
 - [Annotations](annotations.md) — in-code `@pcke-rule` / `@pcke-lesson`
 - [Schema Migrations](schema-migrations.md) — `pcke migrate` usage
 - [Schema Evolution](schema-evolution.md) — online ALTER (add fields/collections)

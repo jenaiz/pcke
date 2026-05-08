@@ -53,6 +53,30 @@ pcke query 'type = "module" AND tags CONTAINS "auth"'
 
 Structured queries using the query DSL. See [Query Language](query-language.md).
 
+## Explore the graph (v0.10+)
+
+After `pcke scan`, the repo is also indexed as a typed-event graph:
+entities, decisions, and the edges between them. A few starting points:
+
+```bash
+# What does this file pull in?
+pcke graph neighbors e:cmd/pcke/main.go --depth=2
+
+# What depends on this file?
+pcke graph impact e:internal/kdb/btree --depth=3
+
+# What rules apply here?
+pcke decision list --severity=must
+pcke decision show adr:0008-context-graph-pivot
+
+# How did this file evolve?
+pcke history e:internal/kdb/db.go
+```
+
+See the [Graph Guide](graph-guide.md) for worked examples (impact
+analysis, time-travel, audit patterns) and
+[Query Language](query-language.md) for the `TRAVERSE` / `AS OF` DSL.
+
 ## View diagnostics
 
 ```bash
