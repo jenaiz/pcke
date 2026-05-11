@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/event"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	pckmcp "github.com/jenaiz/pcke/internal/mcp"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -394,6 +396,249 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// --- get_context_for_file tests ---
+//
+// These tests seed the typed-event log directly via event.Store rather than
+// using the legacy seedDB helper, because the retrieval engine reads from
+// e:/d:/l: records, not kn:/rel: collections.
+
+// seedTypedEventDB returns a DB pre-loaded with the typed-event topology
+// the retrieval engine consumes:
+//
+//	internal/kdb/db.go        ←focus file
+//	  imports → internal/kdb/btree.go
+//	  reverse: cmd/pcke/main.go imports it
+//	  decision_link → adr-0008 (global must)
+func seedTypedEventDB(t *testing.T) *kdb.DB {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("kdb.Open: %v", err)
+	}
+	for range 5 {
+		if err := db.Grow(); err != nil {
+			t.Fatalf("db.Grow: %v", err)
+		}
+	}
+
+	store := event.New(db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	entities := []*event.Entity{
+		{Hdr: event.Header{CreatedAt: now}, EID: "internal/kdb/db.go", Path: "internal/kdb/db.go", Type: "file"},
+		{Hdr: event.Header{CreatedAt: now}, EID: "internal/kdb/btree.go", Path: "internal/kdb/btree.go", Type: "file"},
+		{Hdr: event.Header{CreatedAt: now}, EID: "cmd/pcke/main.go", Path: "cmd/pcke/main.go", Type: "file"},
+	}
+	for _, e := range entities {
+		if _, err := store.Append(ctx, e); err != nil {
+			t.Fatalf("append entity %s: %v", e.EID, err)
+		}
+	}
+
+	if _, err := store.Append(ctx, &event.Decision{
+		Hdr:      event.Header{CreatedAt: now},
+		DID:      "adr-0008",
+		Title:    "Context Graph Pivot",
+		Body:     "Pivot the data model to a typed-event graph.",
+		Severity: event.SeverityMust,
+		Scope:    event.ScopeGlobal,
+		Source:   "adr",
+	}); err != nil {
+		t.Fatalf("append decision: %v", err)
+	}
+
+	links := []*event.Link{
+		{Hdr: event.Header{CreatedAt: now}, SrcRef: "e:internal/kdb/db.go", EdgeType: "imports", DstRef: "e:internal/kdb/btree.go"},
+		{Hdr: event.Header{CreatedAt: now}, SrcRef: "e:cmd/pcke/main.go", EdgeType: "imports", DstRef: "e:internal/kdb/db.go"},
+		{Hdr: event.Header{CreatedAt: now}, SrcRef: "e:internal/kdb/db.go", EdgeType: "decision_link", DstRef: "d:adr-0008"},
+	}
+	for _, l := range links {
+		if _, err := store.AppendLink(ctx, l); err != nil {
+			t.Fatalf("append link: %v", err)
+		}
+	}
+
+	return db
+}
+
+// parseStreamItems splits the streamed tool output into JSON items.
+// The plain-mode StreamWriter joins items with "\n---\n"; this helper
+// reverses the join and unmarshals each segment.
+func parseStreamItems(t *testing.T, text string) []map[string]any {
+	t.Helper()
+	if text == "" {
+		return nil
+	}
+	parts := strings.Split(text, "\n---\n")
+	out := make([]map[string]any, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(p), &m); err != nil {
+			t.Fatalf("unmarshal stream item %q: %v", p, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func TestGetContextForFile_ReturnsFocusAndNeighbors(t *testing.T) {
+	db := seedTypedEventDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := startTestServer(t, db)
+	text := callTool(t, ts, "get_context_for_file", map[string]any{
+		"file_path": "internal/kdb/db.go",
+	})
+
+	items := parseStreamItems(t, text)
+	if len(items) < 2 {
+		t.Fatalf("expected ≥2 items (sections + summary), got %d: %s", len(items), text)
+	}
+
+	refs := map[string]bool{}
+	var summary map[string]any
+	for _, it := range items {
+		if v, ok := it["_summary"].(bool); ok && v {
+			summary = it
+			continue
+		}
+		if ref, ok := it["ref"].(string); ok {
+			refs[ref] = true
+		}
+	}
+
+	for _, want := range []string{
+		"e:internal/kdb/db.go",
+		"e:internal/kdb/btree.go",
+		"e:cmd/pcke/main.go",
+		"d:adr-0008",
+	} {
+		if !refs[want] {
+			t.Errorf("missing ref %q in stream; got %v", want, refs)
+		}
+	}
+
+	if summary == nil {
+		t.Fatal("missing _summary item")
+	}
+	if got, _ := summary["budget_limit"].(float64); got == 0 {
+		t.Errorf("budget_limit should default to engine default, got 0")
+	}
+	if got, _ := summary["section_count"].(float64); int(got) != len(refs) {
+		t.Errorf("section_count = %v, want %d", got, len(refs))
+	}
+}
+
+func TestGetContextForFile_MissingFilePath(t *testing.T) {
+	db := seedTypedEventDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := startTestServer(t, db)
+	text := callTool(t, ts, "get_context_for_file", map[string]any{})
+	if !strings.Contains(text, "file_path") {
+		t.Errorf("expected error mentioning file_path, got: %s", text)
+	}
+}
+
+func TestGetContextForFile_UnscannedFileReturnsSummaryOnly(t *testing.T) {
+	db := seedTypedEventDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := startTestServer(t, db)
+	text := callTool(t, ts, "get_context_for_file", map[string]any{
+		"file_path": "does/not/exist.go",
+	})
+
+	var summary map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &summary); err != nil {
+		t.Fatalf("unmarshal summary-only response %q: %v", text, err)
+	}
+	if got, _ := summary["_summary"].(bool); !got {
+		t.Errorf("expected _summary=true, got: %v", summary)
+	}
+	if got, _ := summary["section_count"].(float64); int(got) != 0 {
+		t.Errorf("section_count = %v, want 0 for unscanned file", got)
+	}
+	warns, _ := summary["warnings"].([]any)
+	if len(warns) == 0 {
+		t.Errorf("expected at least one warning for unscanned file, got: %v", summary)
+	}
+}
+
+func TestGetContextForFile_BudgetTruncates(t *testing.T) {
+	dir := t.TempDir()
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("kdb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	for range 5 {
+		if err := db.Grow(); err != nil {
+			t.Fatalf("db.Grow: %v", err)
+		}
+	}
+
+	store := event.New(db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := store.Append(ctx, &event.Entity{
+		Hdr: event.Header{CreatedAt: now}, EID: "f.go", Path: "f.go", Type: "file",
+	}); err != nil {
+		t.Fatalf("append entity: %v", err)
+	}
+	bigBody := strings.Repeat("word ", 1000) // ~1300 tokens each
+	for _, id := range []string{"a", "b"} {
+		if _, err := store.Append(ctx, &event.Decision{
+			Hdr:      event.Header{CreatedAt: now},
+			DID:      id,
+			Title:    id,
+			Body:     bigBody,
+			Severity: event.SeverityMust,
+			Scope:    event.ScopeGlobal,
+			Source:   "adr",
+		}); err != nil {
+			t.Fatalf("append decision %s: %v", id, err)
+		}
+		if _, err := store.AppendLink(ctx, &event.Link{
+			Hdr: event.Header{CreatedAt: now}, SrcRef: "e:f.go", EdgeType: "decision_link", DstRef: "d:" + id,
+		}); err != nil {
+			t.Fatalf("append link: %v", err)
+		}
+	}
+
+	ts := startTestServer(t, db)
+	text := callTool(t, ts, "get_context_for_file", map[string]any{
+		"file_path": "f.go",
+		"budget":    float64(2000),
+	})
+
+	items := parseStreamItems(t, text)
+	var summary map[string]any
+	for _, it := range items {
+		if v, ok := it["_summary"].(bool); ok && v {
+			summary = it
+		}
+	}
+	if summary == nil {
+		t.Fatalf("missing _summary in %s", text)
+	}
+	if truncated, _ := summary["truncated"].(bool); !truncated {
+		t.Errorf("expected truncated=true with two 1300-token decisions in 2000-token budget, got: %v", summary)
+	}
+	if limit, _ := summary["budget_limit"].(float64); int(limit) != 2000 {
+		t.Errorf("budget_limit = %v, want 2000", limit)
+	}
+	if used, _ := summary["tokens_used"].(float64); int(used) > 2000 {
+		t.Errorf("tokens_used = %v exceeds budget 2000", used)
+	}
 }
 
 func TestMain(m *testing.M) {

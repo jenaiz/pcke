@@ -11,6 +11,7 @@ import (
 	//nolint:staticcheck // SA1019: federation is intentionally retained while frozen; MCP surface keeps the existing tools wired (PRD v5.2 §2).
 	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/onboard"
+	"github.com/jenaiz/pcke/internal/retrieval"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -96,6 +97,31 @@ func (s *Server) registerTools() {
 			mcplib.Description("Direction: 'incoming', 'outgoing', or 'both' (default 'both')"),
 		),
 	), s.handleGetCrossRepoDeps)
+
+	// get_context_for_file — typed-event subgraph for a single file,
+	// ranked + budgeted via the retrieval engine.
+	s.srv.AddTool(mcplib.NewTool("get_context_for_file",
+		mcplib.WithDescription("Get the ranked, budget-bounded context subgraph for a single file: entities in its 2-hop neighborhood, applicable decisions, and linked references."),
+		mcplib.WithString("file_path",
+			mcplib.Required(),
+			mcplib.Description("Repository-relative file path (e.g. 'internal/kdb/db.go')"),
+		),
+		mcplib.WithNumber("budget",
+			mcplib.Description("Approximate token budget; 0 or unset = engine default (2000)"),
+		),
+		mcplib.WithString("workflow",
+			mcplib.Description("Caller's current task: explore | bugfix | feature | review | refactor | test"),
+		),
+		mcplib.WithString("focus",
+			mcplib.Description("Narrow selection: all | constraints | history | patterns | impact"),
+		),
+		mcplib.WithString("already_served",
+			mcplib.Description("Comma-separated refs the agent already has in context (lowers their novelty score)"),
+		),
+		mcplib.WithString("session_id",
+			mcplib.Description("Opaque session identifier; paired with already_served for novelty tracking"),
+		),
+	), s.handleGetContextForFile)
 }
 
 // handleRecall performs a text search over knowledge nodes.
@@ -608,4 +634,123 @@ func matchesDirection(d federation.CrossRepoDep, nodeID, direction string) bool 
 		}
 	}
 	return false
+}
+
+// handleGetContextForFile assembles a ranked, budget-bounded context
+// subgraph for one file. Thin wrapper over retrieval.Engine.Assemble:
+// the engine does the work; the handler maps MCP parameters into a
+// Request and streams the result back as one JSON line per section
+// plus a final summary item.
+//
+// Output shape per section (one per StreamWriter item):
+//
+//	{"ref":"e:internal/kdb/db.go","kind":"entity","title":"…",
+//	 "body":"…","score":0.81,"tokens":45,"created_at":"…"}
+//
+// Final summary item:
+//
+//	{"_summary":true,"tokens_used":1234,"budget_limit":2000,
+//	 "truncated":false,"warnings":[],"section_count":7}
+func (s *Server) handleGetContextForFile(
+	ctx context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	filePath, err := request.RequireString("file_path")
+	if err != nil {
+		return mcplib.NewToolResultError("file_path parameter required"), nil
+	}
+
+	req := retrieval.Request{
+		FilePath:      filePath,
+		Budget:        int(request.GetFloat("budget", 0)),
+		Workflow:      retrieval.Workflow(request.GetString("workflow", "")),
+		Focus:         retrieval.Focus(request.GetString("focus", "")),
+		SessionID:     request.GetString("session_id", ""),
+		AlreadyServed: splitCSV(request.GetString("already_served", "")),
+	}
+
+	engine := retrieval.New(s.db)
+	pkg, err := engine.Assemble(ctx, req)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("assemble: %v", err)), nil
+	}
+
+	if len(pkg.Sections) == 0 {
+		summary := contextForFileSummary(pkg)
+		summaryJSON, _ := json.Marshal(summary)
+		return mcplib.NewToolResultText(string(summaryJSON)), nil
+	}
+
+	sw := NewStreamWriter(ctx, 0, 0)
+	for _, sec := range pkg.Sections {
+		b, marshalErr := json.Marshal(sectionPayload(sec))
+		if marshalErr != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("marshal section: %v", marshalErr)), nil
+		}
+		if writeErr := sw.WriteItem(string(b)); writeErr != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", writeErr)), nil
+		}
+	}
+	summary := contextForFileSummary(pkg)
+	summaryJSON, marshalErr := json.Marshal(summary)
+	if marshalErr != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("marshal summary: %v", marshalErr)), nil
+	}
+	if writeErr := sw.WriteItem(string(summaryJSON)); writeErr != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", writeErr)), nil
+	}
+
+	text, err := sw.Flush()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("stream flush: %v", err)), nil
+	}
+	return mcplib.NewToolResultText(text), nil
+}
+
+// sectionPayload returns a JSON-marshalable map describing the
+// section. Defined as a function because the rendered shape differs
+// slightly from the internal retrieval.Section — we format the
+// timestamp and drop unexported fields that may exist in the future.
+func sectionPayload(sec retrieval.Section) map[string]any {
+	return map[string]any{
+		"ref":        sec.Ref,
+		"kind":       sec.Kind,
+		"title":      sec.Title,
+		"body":       sec.Body,
+		"score":      sec.Score,
+		"tokens":     sec.Tokens,
+		"created_at": sec.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}
+}
+
+// contextForFileSummary returns the final summary item the handler
+// appends after the per-section stream.
+func contextForFileSummary(pkg *retrieval.ContextPackage) map[string]any {
+	warns := pkg.Warnings
+	if warns == nil {
+		warns = []string{}
+	}
+	return map[string]any{
+		"_summary":      true,
+		"tokens_used":   pkg.TokensUsed,
+		"budget_limit":  pkg.BudgetLimit,
+		"truncated":     pkg.Truncated,
+		"warnings":      warns,
+		"section_count": len(pkg.Sections),
+	}
+}
+
+// splitCSV trims and returns non-empty comma-separated values.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
