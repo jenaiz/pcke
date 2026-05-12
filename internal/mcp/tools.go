@@ -98,6 +98,31 @@ func (s *Server) registerTools() {
 		),
 	), s.handleGetCrossRepoDeps)
 
+	// get_context_for_diff — typed-event subgraph for a set of changed
+	// files, ranked + budgeted via the retrieval engine. If
+	// changed_files is empty, auto-detects via `git status` on s.root.
+	s.srv.AddTool(mcplib.NewTool("get_context_for_diff",
+		mcplib.WithDescription("Get ranked, budget-bounded context for the union of subgraphs around a set of changed files. If changed_files is empty, auto-detects via git worktree status."),
+		mcplib.WithString("changed_files",
+			mcplib.Description("Comma-separated repository-relative paths. If empty, auto-detected from `git status`."),
+		),
+		mcplib.WithNumber("budget",
+			mcplib.Description("Approximate token budget; 0 or unset = engine default (2000)"),
+		),
+		mcplib.WithString("workflow",
+			mcplib.Description("Caller's current task: explore | bugfix | feature | review | refactor | test"),
+		),
+		mcplib.WithString("focus",
+			mcplib.Description("Narrow selection: all | constraints | history | patterns | impact"),
+		),
+		mcplib.WithString("already_served",
+			mcplib.Description("Comma-separated refs the agent already has in context"),
+		),
+		mcplib.WithString("session_id",
+			mcplib.Description("Opaque session identifier; paired with already_served for novelty tracking"),
+		),
+	), s.handleGetContextForDiff)
+
 	// get_context_for_file — typed-event subgraph for a single file,
 	// ranked + budgeted via the retrieval engine.
 	s.srv.AddTool(mcplib.NewTool("get_context_for_file",
@@ -634,6 +659,105 @@ func matchesDirection(d federation.CrossRepoDep, nodeID, direction string) bool 
 		}
 	}
 	return false
+}
+
+// handleGetContextForDiff assembles a ranked, budget-bounded context
+// for a set of changed files. When changed_files is empty, the handler
+// asks git for the worktree status and uses the resulting set; if git
+// is unavailable or the worktree is clean, it returns a summary-only
+// response so callers can distinguish "no changes" from a failure.
+//
+// Output shape matches get_context_for_file: one JSON line per
+// section, then a final _summary item.
+func (s *Server) handleGetContextForDiff(
+	ctx context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	changed := splitCSV(request.GetString("changed_files", ""))
+	autodetected := false
+	if len(changed) == 0 {
+		detected, derr := analysis.NewGitIntel(s.root)
+		if derr == nil {
+			files, ferr := detected.ChangedFiles()
+			if ferr == nil {
+				changed = files
+				autodetected = true
+			}
+		}
+	}
+
+	req := retrieval.Request{
+		ChangedFiles:  changed,
+		Budget:        int(request.GetFloat("budget", 0)),
+		Workflow:      retrieval.Workflow(request.GetString("workflow", "")),
+		Focus:         retrieval.Focus(request.GetString("focus", "")),
+		SessionID:     request.GetString("session_id", ""),
+		AlreadyServed: splitCSV(request.GetString("already_served", "")),
+	}
+
+	engine := retrieval.New(s.db)
+	pkg, err := engine.Assemble(ctx, req)
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("assemble: %v", err)), nil
+	}
+
+	if autodetected && len(changed) == 0 {
+		pkg.Warnings = append(pkg.Warnings, "git worktree is clean; no changed files to analyse")
+	}
+
+	if len(pkg.Sections) == 0 {
+		summary := contextForDiffSummary(pkg, changed)
+		summaryJSON, _ := json.Marshal(summary)
+		return mcplib.NewToolResultText(string(summaryJSON)), nil
+	}
+
+	sw := NewStreamWriter(ctx, 0, 0)
+	for _, sec := range pkg.Sections {
+		b, marshalErr := json.Marshal(sectionPayload(sec))
+		if marshalErr != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("marshal section: %v", marshalErr)), nil
+		}
+		if writeErr := sw.WriteItem(string(b)); writeErr != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", writeErr)), nil
+		}
+	}
+	summary := contextForDiffSummary(pkg, changed)
+	summaryJSON, marshalErr := json.Marshal(summary)
+	if marshalErr != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("marshal summary: %v", marshalErr)), nil
+	}
+	if writeErr := sw.WriteItem(string(summaryJSON)); writeErr != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("stream: %v", writeErr)), nil
+	}
+
+	text, err := sw.Flush()
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("stream flush: %v", err)), nil
+	}
+	return mcplib.NewToolResultText(text), nil
+}
+
+// contextForDiffSummary mirrors contextForFileSummary but also echoes
+// the changed-file list back so the caller can verify what the engine
+// actually used (especially under git autodetect).
+func contextForDiffSummary(pkg *retrieval.ContextPackage, changedFiles []string) map[string]any {
+	warns := pkg.Warnings
+	if warns == nil {
+		warns = []string{}
+	}
+	files := changedFiles
+	if files == nil {
+		files = []string{}
+	}
+	return map[string]any{
+		"_summary":      true,
+		"tokens_used":   pkg.TokensUsed,
+		"budget_limit":  pkg.BudgetLimit,
+		"truncated":     pkg.Truncated,
+		"warnings":      warns,
+		"section_count": len(pkg.Sections),
+		"changed_files": files,
+	}
 }
 
 // handleGetContextForFile assembles a ranked, budget-bounded context

@@ -3,6 +3,7 @@ package analysis // git.go — go-git intelligence for change frequency, stabili
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -293,6 +294,40 @@ func (g *GitIntel) Authorship() (map[string][]AuthorCommits, error) {
 		sortAuthorCommits(result[mod])
 	}
 	return result, nil
+}
+
+// ChangedFiles returns the worktree-relative paths whose state differs
+// from HEAD: anything modified, added, deleted, or renamed in the index
+// OR in the working tree. Untracked files are excluded so editor scratch
+// files and build artifacts don't pollute "what is the agent changing
+// right now."
+//
+// Paths are returned in lex order so callers see a stable list. An empty
+// slice means the worktree matches HEAD.
+func (g *GitIntel) ChangedFiles() ([]string, error) {
+	wt, err := g.repo.Worktree()
+	if err != nil {
+		return nil, fmt.Errorf("worktree: %w", err)
+	}
+	status, err := wt.Status()
+	if err != nil {
+		return nil, fmt.Errorf("worktree status: %w", err)
+	}
+
+	out := make([]string, 0, len(status))
+	for path, s := range status {
+		// Skip untracked — agents shouldn't ask the engine for context on
+		// files the index doesn't yet know about.
+		if s.Worktree == git.Untracked && s.Staging == git.Untracked {
+			continue
+		}
+		if s.Worktree == git.Unmodified && s.Staging == git.Unmodified {
+			continue
+		}
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // GitIgnoredFiles returns the set of files that are git-ignored.

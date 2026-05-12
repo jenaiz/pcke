@@ -641,6 +641,136 @@ func TestGetContextForFile_BudgetTruncates(t *testing.T) {
 	}
 }
 
+// --- get_context_for_diff tests ---
+
+func TestGetContextForDiff_ExplicitChangedFiles(t *testing.T) {
+	db := seedTypedEventDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := startTestServer(t, db)
+	text := callTool(t, ts, "get_context_for_diff", map[string]any{
+		"changed_files": "internal/kdb/db.go,internal/kdb/btree.go",
+	})
+
+	items := parseStreamItems(t, text)
+	if len(items) < 2 {
+		t.Fatalf("expected ≥2 items, got %d: %s", len(items), text)
+	}
+	refs := map[string]bool{}
+	var summary map[string]any
+	for _, it := range items {
+		if v, ok := it["_summary"].(bool); ok && v {
+			summary = it
+			continue
+		}
+		if ref, ok := it["ref"].(string); ok {
+			refs[ref] = true
+		}
+	}
+	for _, want := range []string{"e:internal/kdb/db.go", "e:internal/kdb/btree.go"} {
+		if !refs[want] {
+			t.Errorf("missing ref %q in stream; got %v", want, refs)
+		}
+	}
+	if summary == nil {
+		t.Fatal("missing _summary item")
+	}
+	files, _ := summary["changed_files"].([]any)
+	if len(files) != 2 {
+		t.Errorf("changed_files echo = %v, want 2 paths", files)
+	}
+}
+
+func TestGetContextForDiff_NoChangesNoGit(t *testing.T) {
+	db := seedTypedEventDB(t)
+	defer func() { _ = db.Close() }()
+
+	// startTestServer hands a t.TempDir() to pckmcp.New as root, which is
+	// not a git repo — autodetect will fail and the engine should warn.
+	ts := startTestServer(t, db)
+	text := callTool(t, ts, "get_context_for_diff", map[string]any{})
+
+	var summary map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &summary); err != nil {
+		t.Fatalf("unmarshal summary-only response %q: %v", text, err)
+	}
+	if got, _ := summary["_summary"].(bool); !got {
+		t.Errorf("expected _summary=true, got: %v", summary)
+	}
+	if got, _ := summary["section_count"].(float64); int(got) != 0 {
+		t.Errorf("section_count = %v, want 0 with no changed files", got)
+	}
+	warns, _ := summary["warnings"].([]any)
+	if len(warns) == 0 {
+		t.Errorf("expected at least one warning when no changed files supplied, got: %v", summary)
+	}
+}
+
+func TestGetContextForDiff_BudgetTruncates(t *testing.T) {
+	dir := t.TempDir()
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("kdb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	for range 5 {
+		if err := db.Grow(); err != nil {
+			t.Fatalf("db.Grow: %v", err)
+		}
+	}
+
+	store := event.New(db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := store.Append(ctx, &event.Entity{
+		Hdr: event.Header{CreatedAt: now}, EID: "f.go", Path: "f.go", Type: "file",
+	}); err != nil {
+		t.Fatalf("append entity: %v", err)
+	}
+	bigBody := strings.Repeat("word ", 1000)
+	for _, id := range []string{"a", "b"} {
+		if _, err := store.Append(ctx, &event.Decision{
+			Hdr:      event.Header{CreatedAt: now},
+			DID:      id,
+			Title:    id,
+			Body:     bigBody,
+			Severity: event.SeverityMust,
+			Scope:    event.ScopeGlobal,
+			Source:   "adr",
+		}); err != nil {
+			t.Fatalf("append decision %s: %v", id, err)
+		}
+		if _, err := store.AppendLink(ctx, &event.Link{
+			Hdr: event.Header{CreatedAt: now}, SrcRef: "e:f.go", EdgeType: "decision_link", DstRef: "d:" + id,
+		}); err != nil {
+			t.Fatalf("append link: %v", err)
+		}
+	}
+
+	ts := startTestServer(t, db)
+	text := callTool(t, ts, "get_context_for_diff", map[string]any{
+		"changed_files": "f.go",
+		"budget":        float64(2000),
+	})
+
+	items := parseStreamItems(t, text)
+	var summary map[string]any
+	for _, it := range items {
+		if v, ok := it["_summary"].(bool); ok && v {
+			summary = it
+		}
+	}
+	if summary == nil {
+		t.Fatalf("missing _summary in %s", text)
+	}
+	if truncated, _ := summary["truncated"].(bool); !truncated {
+		t.Errorf("expected truncated=true, got: %v", summary)
+	}
+	if used, _ := summary["tokens_used"].(float64); int(used) > 2000 {
+		t.Errorf("tokens_used = %v exceeds budget 2000", used)
+	}
+}
+
 func TestMain(m *testing.M) {
 	_ = filepath.Join(os.TempDir(), "pcke-mcp-test")
 	os.Exit(m.Run())
