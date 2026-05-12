@@ -47,6 +47,14 @@ func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
 		return nil, fmt.Errorf("output: load nodes: %w", err)
 	}
 
+	// Topology powers the agent-instruction files' Architecture Quick
+	// Reference. An empty graph (legacy KB before the typed-event
+	// migration) is not fatal — the renderer skips the section.
+	topo, err := ComputeTopology(ctx, r.db)
+	if err != nil {
+		return nil, fmt.Errorf("output: compute topology: %w", err)
+	}
+
 	result := &SyncResult{}
 
 	generators := []struct {
@@ -85,8 +93,8 @@ func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
 		path    string
 		content string
 	}{
-		{".github/copilot-instructions.md", renderCopilotInstructions(nodes, modules)},
-		{".claude/CLAUDE.md", renderClaudeInstructions(nodes, modules)},
+		{".github/copilot-instructions.md", renderCopilotInstructions(nodes, modules, topo)},
+		{".claude/CLAUDE.md", renderClaudeInstructions(nodes, modules, topo)},
 	}
 	for _, af := range agentFiles {
 		if err := r.writeFile(af.path, af.content); err != nil {
