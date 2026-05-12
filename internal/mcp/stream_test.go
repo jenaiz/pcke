@@ -7,7 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/jenaiz/pcke/internal/kdb/event"
 	pckmcp "github.com/jenaiz/pcke/internal/mcp"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -536,6 +538,91 @@ func TestSuggestContext_Enabled_NoModule(t *testing.T) {
 	}
 	if pc != nil {
 		t.Error("expected nil when no module matches")
+	}
+}
+
+func TestSuggestContext_DecisionWarnings(t *testing.T) {
+	// seedDB plants kn:/rel: records; we layer typed-event decisions +
+	// decision_links on top so SuggestContext can find both the legacy
+	// module (via nodes) and the must-severity rules attached to its
+	// files (via the new graph traversal).
+	db := seedDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	store := event.New(db)
+	now := time.Now().UTC()
+	// Must rule attached to internal/kdb/db.go.
+	if _, err := store.Append(ctx, &event.Decision{
+		Hdr:      event.Header{CreatedAt: now},
+		DID:      "rule-mvcc",
+		Title:    "Always commit transactions",
+		Body:     "Use db.Update or explicit commit.",
+		Severity: event.SeverityMust,
+		Scope:    event.ScopeModule,
+		Source:   "adr",
+	}); err != nil {
+		t.Fatalf("append must decision: %v", err)
+	}
+	// Should rule on the same file — must NOT appear in warnings.
+	if _, err := store.Append(ctx, &event.Decision{
+		Hdr:      event.Header{CreatedAt: now},
+		DID:      "rule-format",
+		Title:    "Run gofumpt",
+		Severity: event.SeverityShould,
+		Scope:    event.ScopeModule,
+		Source:   "adr",
+	}); err != nil {
+		t.Fatalf("append should decision: %v", err)
+	}
+	if _, err := store.AppendLink(ctx, &event.Link{
+		Hdr: event.Header{CreatedAt: now}, SrcRef: "e:internal/kdb/db.go", EdgeType: "decision_link", DstRef: "d:rule-mvcc",
+	}); err != nil {
+		t.Fatalf("append link: %v", err)
+	}
+	if _, err := store.AppendLink(ctx, &event.Link{
+		Hdr: event.Header{CreatedAt: now}, SrcRef: "e:internal/kdb/db.go", EdgeType: "decision_link", DstRef: "d:rule-format",
+	}); err != nil {
+		t.Fatalf("append link: %v", err)
+	}
+
+	srv := pckmcp.New(db, t.TempDir())
+	pc, err := srv.SuggestContext(ctx, "tell me about internal/kdb", true)
+	if err != nil {
+		t.Fatalf("SuggestContext: %v", err)
+	}
+	if pc == nil {
+		t.Fatal("expected proactive context")
+	}
+	if len(pc.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly 1 (must-severity only)", pc.Warnings)
+	}
+	if pc.Warnings[0].DID != "rule-mvcc" {
+		t.Errorf("warning DID = %q, want rule-mvcc", pc.Warnings[0].DID)
+	}
+	if pc.Warnings[0].Severity != "must" {
+		t.Errorf("warning severity = %q, want must", pc.Warnings[0].Severity)
+	}
+}
+
+func TestSuggestContext_NoTypedEventsIsEmpty(t *testing.T) {
+	// Legacy KB: no typed events seeded. Warnings should be empty,
+	// constraints + history still rendered.
+	db := seedDB(t)
+	defer func() { _ = db.Close() }()
+	srv := pckmcp.New(db, t.TempDir())
+	pc, err := srv.SuggestContext(context.Background(), "tell me about internal/kdb", true)
+	if err != nil {
+		t.Fatalf("SuggestContext: %v", err)
+	}
+	if pc == nil {
+		t.Fatal("expected proactive context for matched module")
+	}
+	if len(pc.Warnings) != 0 {
+		t.Errorf("legacy KB warnings = %v, want empty", pc.Warnings)
+	}
+	if pc.Constraints == "" {
+		t.Errorf("expected constraints to still render on legacy KB")
 	}
 }
 

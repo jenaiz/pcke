@@ -3,8 +3,12 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/jenaiz/pcke/internal/analysis"
+	"github.com/jenaiz/pcke/internal/kdb/event"
+	"github.com/jenaiz/pcke/internal/kdb/graph"
 	"github.com/jenaiz/pcke/internal/output"
 )
 
@@ -22,6 +26,23 @@ type ProactiveContext struct {
 	Constraints string `json:"constraints,omitempty"`
 	// History contains recent evolution history for the module.
 	History string `json:"history,omitempty"`
+	// Warnings is the set of must-severity decisions reachable from the
+	// matched module's entities via decision_link. These are the
+	// "thou-shalt-not" rules an agent editing this module needs to
+	// know before writing code. Filled by F13.T5; empty when the
+	// typed-event log has no must-severity decision links for any
+	// file in the module.
+	Warnings []DecisionWarning `json:"warnings,omitempty"`
+}
+
+// DecisionWarning is one binding rule attached to the matched module.
+// Fields mirror event.Decision but are flattened for JSON consumers.
+type DecisionWarning struct {
+	DID      string `json:"did"`
+	Title    string `json:"title"`
+	Body     string `json:"body,omitempty"`
+	Severity string `json:"severity"`
+	Source   string `json:"source,omitempty"`
 }
 
 // SuggestContext analyzes a tool query and returns proactive context if a
@@ -76,5 +97,70 @@ func (s *Server) SuggestContext(ctx context.Context, query string, enabled bool)
 		History:     output.RenderHistory(filtered),
 	}
 
+	warnings, err := s.decisionWarningsForModule(ctx, filtered)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: suggest decisions: %w", err)
+	}
+	pc.Warnings = warnings
+
 	return pc, nil
+}
+
+// decisionWarningsForModule returns must-severity decisions reachable
+// via `decision_link` from any entity in the matched module. It is a
+// graceful no-op on a legacy KB that has no typed-event log: the
+// graph traversal returns an empty result and warnings stays empty.
+//
+// Results are deduplicated by DID and sorted by DID for stable output.
+// Only the latest version of each decision is returned, and only when
+// its current Severity is Must — superseded `should` versions of a
+// formerly-`must` rule are intentionally excluded.
+func (s *Server) decisionWarningsForModule(
+	ctx context.Context,
+	nodes []analysis.KnowledgeNode,
+) ([]DecisionWarning, error) {
+	store := event.New(s.db)
+	opts := graph.TraversalOptions{
+		Direction: graph.Forward,
+		MaxDepth:  1,
+		EdgeTypes: []string{"decision_link"},
+	}
+	seen := map[string]struct{}{}
+	var out []DecisionWarning
+	for _, n := range nodes {
+		if n.FilePath == "" {
+			continue
+		}
+		refs, err := graph.Neighbors(ctx, s.db, graph.Ref("e:"+n.FilePath), opts)
+		if err != nil {
+			return nil, fmt.Errorf("neighbors %q: %w", n.FilePath, err)
+		}
+		for _, r := range refs {
+			did, ok := strings.CutPrefix(string(r), "d:")
+			if !ok {
+				continue
+			}
+			if _, dup := seen[did]; dup {
+				continue
+			}
+			seen[did] = struct{}{}
+			evt, err := store.Latest(ctx, event.KindDecision, did)
+			if err != nil {
+				continue
+			}
+			d, ok := evt.(*event.Decision)
+			if !ok || d.Severity != event.SeverityMust {
+				continue
+			}
+			out = append(out, DecisionWarning{
+				DID:      d.DID,
+				Title:    d.Title,
+				Body:     d.Body,
+				Severity: "must",
+				Source:   d.Source,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DID < out[j].DID })
+	return out, nil
 }
