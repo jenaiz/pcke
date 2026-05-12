@@ -13,7 +13,7 @@ local knowledge base for AI assistants.
 - [Annotations](annotations.md) — in-code `@pcke-rule` / `@pcke-lesson`
 - [Schema Migrations](schema-migrations.md) — `pcke migrate` usage
 - [Schema Evolution](schema-evolution.md) — online ALTER (add fields/collections)
-- [Advanced MCP](advanced-mcp.md) — streaming, subscriptions, prompt templates
+- [Advanced MCP](advanced-mcp.md) — streaming, subscriptions, prompt templates, subgraph retrieval (v0.11)
 - [Onboarding Mode](onboarding.md) — auto-generated project walkthroughs
 - [Federation](federation.md) — multi-repo intelligence, cross-repo queries
 

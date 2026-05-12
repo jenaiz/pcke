@@ -185,6 +185,116 @@ extra fields are added.
 
 ---
 
+## Subgraph Retrieval (v0.11)
+
+v0.11 adds two ranked, budget-bounded retrieval tools that walk the
+typed-event graph instead of scanning the flat knowledge base.
+
+### `get_context_for_file`
+
+Ask for the 2-hop neighborhood of a single file: its direct imports,
+its reverse callers, plus any decisions linked to it via
+`decision_link`. The engine scores each section with the formula
+
+```
+Score = 0.25*recency + 0.35*severity + 0.25*proximity + 0.15*novelty
+```
+
+and admits the highest-scoring set that fits the requested token
+budget.
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "get_context_for_file",
+    "arguments": {
+      "file_path": "internal/kdb/btree/split.go",
+      "budget": 2000,
+      "workflow": "bugfix"
+    }
+  }
+}
+```
+
+The response is streamed — one JSON object per ranked section, ending
+in a `{"_summary": true, ...}` item with `tokens_used`, `budget_limit`,
+`truncated`, `warnings`, and `section_count`.
+
+Parameters:
+
+| Parameter | Description |
+|-----------|-------------|
+| `file_path` (required) | Repository-relative path |
+| `budget` | Approximate token budget; 0 = engine default (2000) |
+| `workflow` | `explore` \| `bugfix` \| `feature` \| `review` \| `refactor` \| `test` |
+| `focus` | `all` \| `constraints` \| `history` \| `patterns` \| `impact` |
+| `already_served` | CSV refs to deprioritise (novelty 0) |
+| `session_id` | Opaque id; refs the server has already streamed on this session are added to `already_served` automatically |
+
+### `get_context_for_diff`
+
+Same engine, fed with a set of changed files. If `changed_files` is
+omitted, the server reads `git status` for the server's root and uses
+every path with a non-clean state (untracked-only paths excluded).
+
+```json
+{
+  "name": "get_context_for_diff",
+  "arguments": {
+    "budget": 2500
+  }
+}
+```
+
+The summary item echoes `changed_files` back so the caller can confirm
+which paths the engine actually traversed.
+
+### Session-scoped novelty
+
+Pass the same `session_id` across multiple `get_context_for_file` /
+`get_context_for_diff` calls and the engine treats every ref it has
+already served on that session as `novelty = 0`. The accumulated set
+lives in memory (`internal/retrieval/session`) — restart `pcke serve`
+to clear it. Phase 14 will swap the storage backend for a kdb-backed
+store without changing call sites.
+
+### Proactive warnings
+
+When proactive context is enabled, `SuggestContext` now also includes
+a `warnings` array listing must-severity decisions reachable from the
+matched module via `decision_link`. Each warning carries `did`,
+`title`, `body`, `severity`, and `source` so the agent can cite the
+rule it just received.
+
+### Architecture Quick Reference
+
+`pcke sync` (v0.11+) writes a graph-derived **Architecture Quick
+Reference** block into `.github/copilot-instructions.md` and
+`.claude/CLAUDE.md`. The block lists:
+
+- **Entry points** — entities with import fan-in ≤ 1 and fan-out ≥ 3.
+- **Core modules** — directories ranked by aggregate incoming-import
+  fan-in.
+- **Decision hotspots** — files targeted by ≥ 3 must-severity
+  decisions.
+
+The block is omitted on legacy knowledge bases without a typed-event
+log, so the rest of the rendered output is unchanged.
+
+### Optional vector re-ranker (`-tags=rerank`)
+
+The default build links no embedding code; `Reranker.Available()` is
+hardcoded `false`. Building with `-tags=rerank` swaps in an adapter
+stub that callers can replace with a real backend (ONNX, external
+HTTP, etc.). No model is bundled in either build path. The re-ranker
+may only permute the already-retrieved subgraph — it cannot add or
+remove sections, so provenance is preserved.
+
+```bash
+go build -tags=rerank ./...
+```
+
 ## Full MCP configuration reference
 
 ```toml
@@ -193,6 +303,12 @@ read_timeout_sec = 30       # MCP read timeout
 proactive_context = false   # opt-in proactive suggestions
 stream_threshold = 50       # chunking threshold (items)
 chunk_size = 20             # items per chunk
+
+# v0.11+ — optional re-ranker (requires -tags=rerank build)
+[mcp.rerank]
+enabled = false
+backend = "onnx"            # or "external"
+model = ""
 ```
 
 All settings can be overridden with `PCKE_MCP_*` environment variables.
