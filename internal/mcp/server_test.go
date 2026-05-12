@@ -641,6 +641,76 @@ func TestGetContextForFile_BudgetTruncates(t *testing.T) {
 	}
 }
 
+// --- session tests ---
+
+func TestGetContextForFile_SessionTracksServedRefs(t *testing.T) {
+	db := seedTypedEventDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := startTestServer(t, db)
+
+	first := callTool(t, ts, "get_context_for_file", map[string]any{
+		"file_path":  "internal/kdb/db.go",
+		"session_id": "test-session",
+	})
+	firstItems := parseStreamItems(t, first)
+	if len(firstItems) < 2 {
+		t.Fatalf("first call: expected ≥2 items, got %d", len(firstItems))
+	}
+
+	// Second call on the same session — the engine should now treat
+	// all refs from the first call as already-served (novelty 0),
+	// which surfaces as lower scores on those refs. We don't assert
+	// the exact ranking, only that the engine *received* the served
+	// list — by checking that a section's score for a previously-
+	// served ref is strictly less than its score on a fresh session.
+	second := callTool(t, ts, "get_context_for_file", map[string]any{
+		"file_path":  "internal/kdb/db.go",
+		"session_id": "test-session",
+	})
+	secondItems := parseStreamItems(t, second)
+
+	fresh := callTool(t, ts, "get_context_for_file", map[string]any{
+		"file_path":  "internal/kdb/db.go",
+		"session_id": "different-session",
+	})
+	freshItems := parseStreamItems(t, fresh)
+
+	scoreFor := func(items []map[string]any, ref string) float64 {
+		for _, it := range items {
+			if r, ok := it["ref"].(string); ok && r == ref {
+				if s, ok := it["score"].(float64); ok {
+					return s
+				}
+			}
+		}
+		return -1
+	}
+	pickRef := "e:internal/kdb/db.go"
+	secondScore := scoreFor(secondItems, pickRef)
+	freshScore := scoreFor(freshItems, pickRef)
+	if secondScore < 0 || freshScore < 0 {
+		t.Fatalf("expected %s in both responses; second=%f fresh=%f", pickRef, secondScore, freshScore)
+	}
+	if secondScore >= freshScore {
+		t.Errorf("session reuse should lower score on already-served ref: second=%f fresh=%f", secondScore, freshScore)
+	}
+}
+
+func TestGetContextForFile_NoSessionIDLeavesEngineUnaffected(t *testing.T) {
+	db := seedTypedEventDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := startTestServer(t, db)
+	// Two anonymous calls — neither registers session state.
+	_ = callTool(t, ts, "get_context_for_file", map[string]any{"file_path": "internal/kdb/db.go"})
+	second := callTool(t, ts, "get_context_for_file", map[string]any{"file_path": "internal/kdb/db.go"})
+	items := parseStreamItems(t, second)
+	if len(items) < 2 {
+		t.Fatalf("expected ≥2 items, got %d", len(items))
+	}
+}
+
 // --- get_context_for_diff tests ---
 
 func TestGetContextForDiff_ExplicitChangedFiles(t *testing.T) {

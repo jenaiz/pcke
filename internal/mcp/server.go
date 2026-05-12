@@ -14,6 +14,7 @@ import (
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/output"
+	"github.com/jenaiz/pcke/internal/retrieval/session"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
@@ -25,12 +26,13 @@ type Server struct {
 	resources []mcpserver.ServerResource
 	prompts   []mcpserver.ServerPrompt
 	broker    *Broker
+	sessions  *session.MemoryStore
 }
 
 // New creates a [Server] backed by the given kdb database.
 // All tools and resources are read-only.
 func New(db *kdb.DB, root string) *Server {
-	s := &Server{db: db, root: root, broker: NewBroker()}
+	s := &Server{db: db, root: root, broker: NewBroker(), sessions: session.NewMemoryStore()}
 
 	s.srv = mcpserver.NewMCPServer(
 		"pcke",

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jenaiz/pcke/internal/analysis"
 	//nolint:staticcheck // SA1019: federation is intentionally retained while frozen; MCP surface keeps the existing tools wired (PRD v5.2 §2).
 	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/onboard"
 	"github.com/jenaiz/pcke/internal/retrieval"
+	"github.com/jenaiz/pcke/internal/retrieval/session"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -686,13 +688,16 @@ func (s *Server) handleGetContextForDiff(
 		}
 	}
 
+	sessionID := request.GetString("session_id", "")
+	served := s.servedForSession(sessionID, splitCSV(request.GetString("already_served", "")))
+
 	req := retrieval.Request{
 		ChangedFiles:  changed,
 		Budget:        int(request.GetFloat("budget", 0)),
 		Workflow:      retrieval.Workflow(request.GetString("workflow", "")),
 		Focus:         retrieval.Focus(request.GetString("focus", "")),
-		SessionID:     request.GetString("session_id", ""),
-		AlreadyServed: splitCSV(request.GetString("already_served", "")),
+		SessionID:     sessionID,
+		AlreadyServed: served,
 	}
 
 	engine := retrieval.New(s.db)
@@ -700,6 +705,8 @@ func (s *Server) handleGetContextForDiff(
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("assemble: %v", err)), nil
 	}
+
+	s.noteSession(sessionID, pkg)
 
 	if autodetected && len(changed) == 0 {
 		pkg.Warnings = append(pkg.Warnings, "git worktree is clean; no changed files to analyse")
@@ -784,13 +791,16 @@ func (s *Server) handleGetContextForFile(
 		return mcplib.NewToolResultError("file_path parameter required"), nil
 	}
 
+	sessionID := request.GetString("session_id", "")
+	served := s.servedForSession(sessionID, splitCSV(request.GetString("already_served", "")))
+
 	req := retrieval.Request{
 		FilePath:      filePath,
 		Budget:        int(request.GetFloat("budget", 0)),
 		Workflow:      retrieval.Workflow(request.GetString("workflow", "")),
 		Focus:         retrieval.Focus(request.GetString("focus", "")),
-		SessionID:     request.GetString("session_id", ""),
-		AlreadyServed: splitCSV(request.GetString("already_served", "")),
+		SessionID:     sessionID,
+		AlreadyServed: served,
 	}
 
 	engine := retrieval.New(s.db)
@@ -798,6 +808,8 @@ func (s *Server) handleGetContextForFile(
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("assemble: %v", err)), nil
 	}
+
+	s.noteSession(sessionID, pkg)
 
 	if len(pkg.Sections) == 0 {
 		summary := contextForFileSummary(pkg)
@@ -862,6 +874,61 @@ func contextForFileSummary(pkg *retrieval.ContextPackage) map[string]any {
 		"warnings":      warns,
 		"section_count": len(pkg.Sections),
 	}
+}
+
+// servedForSession returns the union of (a) refs the caller explicitly
+// flagged via already_served and (b) refs the server has already served
+// in the named session, so novelty scoring covers both sources.
+//
+// Empty sessionID means "no server-side tracking" — only the caller-
+// supplied list is returned. Phase 14 will swap MemoryStore for a
+// kdb-backed Store behind the same interface.
+func (s *Server) servedForSession(sessionID string, callerSupplied []string) []string {
+	if sessionID == "" {
+		return callerSupplied
+	}
+	sess := s.sessions.Get(sessionID)
+	prior := sess.Served()
+	if len(prior) == 0 {
+		return callerSupplied
+	}
+	if len(callerSupplied) == 0 {
+		return prior
+	}
+	seen := make(map[string]struct{}, len(prior)+len(callerSupplied))
+	out := make([]string, 0, len(prior)+len(callerSupplied))
+	for _, r := range prior {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	for _, r := range callerSupplied {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	return out
+}
+
+// noteSession records the refs the engine actually returned so the
+// next call on the same session inherits them as already-served.
+// Empty sessionID short-circuits.
+func (s *Server) noteSession(sessionID string, pkg *retrieval.ContextPackage) {
+	if sessionID == "" || pkg == nil || len(pkg.Sections) == 0 {
+		return
+	}
+	refs := make([]string, 0, len(pkg.Sections))
+	for _, sec := range pkg.Sections {
+		refs = append(refs, sec.Ref)
+	}
+	s.sessions.Get(sessionID).Note(session.Observation{
+		Refs: refs,
+		At:   time.Now().UTC(),
+	})
 }
 
 // splitCSV trims and returns non-empty comma-separated values.
