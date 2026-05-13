@@ -1215,6 +1215,11 @@ func registerMigrations(e *migrate.Engine) {
 	// by the next scan from git history; new schema captures evolution
 	// as the version chain on Entity events).
 	e.Register(migrate.V0014RetireEvolutionLog())
+	// v15 — F14.T1: register Phase 14 Observation sub-types
+	// (o:session:<uuid>, o:call:<uuid>) and the edge types
+	// contains/served/belongs_to. Pure version marker; sub-type writers
+	// land in F14.T2.
+	e.Register(migrate.V0015SessionBaseline())
 }
 
 // configGet returns the value of a dotted config key (e.g. "scan.redact_secrets").
