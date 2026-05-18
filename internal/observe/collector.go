@@ -29,6 +29,13 @@ type Updater interface {
 	Update(ctx context.Context, fn func(*tx.WriteTx) error) error
 }
 
+// grower is the optional Updater extension the collector uses to add
+// free pages when a batch exhausts the freelist. *kdb.DB satisfies it.
+// Updaters without Grow() fail the batch on out-of-pages.
+type grower interface {
+	Grow() error
+}
+
 // SessionStart is the record produced when an agent session is first
 // observed. The Observation is written once per session; subsequent
 // Calls on the same session re-use it via a belongs_to / contains pair.
@@ -275,14 +282,41 @@ func (c *Collector) run() {
 	}
 }
 
+// pagesPerRecord is a conservative upper bound on the number of new
+// pages a single record can allocate in one transaction. Each Call
+// record writes 1 Observation + up to ~10 Links + each row's overflow
+// chain (the overflow threshold is ~6 bytes, so every encoded event
+// uses at least 1 overflow page). 32 leaves headroom for btree splits.
+const pagesPerRecord = 32
+
 // writeBatch persists batch atomically. All records of the same
 // session join the same WriteTx so the contains/belongs_to edges land
 // together with their endpoints.
+//
+// kdb does not auto-grow inside a write transaction. To prevent the
+// freelist from running dry mid-tx (and triggering a partial WAL
+// record that would fail to replay), we pre-grow the file enough to
+// satisfy the entire batch BEFORE opening the tx. The growth path
+// updates the in-memory freelist eagerly; the subsequent Update's
+// commitMeta persists the new size + freelist root so re-opens see
+// the same state.
+//
+// If the Updater does not implement Grow (e.g. test doubles), the
+// batch is attempted as-is — small batches succeed and large batches
+// surface the freelist error to the caller.
 func (c *Collector) writeBatch(batch []record) error {
 	if c.disabled.Load() {
-		// Discard silently — disable is intentional.
 		return nil
 	}
+	if g, ok := c.updater.(grower); ok {
+		needed := (len(batch)*pagesPerRecord + (growthChunkPages - 1)) / growthChunkPages
+		for i := 0; i < needed; i++ {
+			if err := g.Grow(); err != nil {
+				return fmt.Errorf("observe: pre-grow %d/%d: %w", i+1, needed, err)
+			}
+		}
+	}
+
 	ctx := context.Background()
 	err := c.updater.Update(ctx, func(wtx *tx.WriteTx) error {
 		for _, r := range batch {
@@ -307,6 +341,11 @@ func (c *Collector) writeBatch(batch []record) error {
 	c.writtenCnt.Add(int64(len(batch)))
 	return nil
 }
+
+// growthChunkPages mirrors kdb.GrowthChunk locally to avoid an import
+// cycle (observe imports kdb/event, kdb/tx, and the test files build
+// against *kdb.DB). Keep in sync with internal/kdb/db.go.
+const growthChunkPages = 16
 
 // writeSession appends the Session observation if we have not already
 // seen its UUID in this process lifetime. Idempotent within a process;

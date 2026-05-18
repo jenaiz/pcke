@@ -706,7 +706,7 @@ func (s *Server) handleGetContextForDiff(
 		return mcplib.NewToolResultError(fmt.Sprintf("assemble: %v", err)), nil
 	}
 
-	s.noteSession(sessionID, pkg)
+	s.noteSession(sessionID, "get_context_for_diff", pkg)
 
 	if autodetected && len(changed) == 0 {
 		pkg.Warnings = append(pkg.Warnings, "git worktree is clean; no changed files to analyse")
@@ -809,7 +809,7 @@ func (s *Server) handleGetContextForFile(
 		return mcplib.NewToolResultError(fmt.Sprintf("assemble: %v", err)), nil
 	}
 
-	s.noteSession(sessionID, pkg)
+	s.noteSession(sessionID, "get_context_for_file", pkg)
 
 	if len(pkg.Sections) == 0 {
 		summary := contextForFileSummary(pkg)
@@ -916,8 +916,10 @@ func (s *Server) servedForSession(sessionID string, callerSupplied []string) []s
 
 // noteSession records the refs the engine actually returned so the
 // next call on the same session inherits them as already-served.
-// Empty sessionID short-circuits.
-func (s *Server) noteSession(sessionID string, pkg *retrieval.ContextPackage) {
+// Empty sessionID short-circuits. tool is the MCP tool name; the
+// persistent session impl (Phase 14) stamps it on the resulting
+// ToolCall observation.
+func (s *Server) noteSession(sessionID, tool string, pkg *retrieval.ContextPackage) {
 	if sessionID == "" || pkg == nil || len(pkg.Sections) == 0 {
 		return
 	}
@@ -928,6 +930,7 @@ func (s *Server) noteSession(sessionID string, pkg *retrieval.ContextPackage) {
 	s.sessions.Get(sessionID).Note(session.Observation{
 		Refs: refs,
 		At:   time.Now().UTC(),
+		Tool: tool,
 	})
 }
 

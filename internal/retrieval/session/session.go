@@ -16,9 +16,15 @@ import (
 // Observation is the unit of session writes: one snapshot of refs that
 // were served to the agent in a single retrieval response, with the
 // time the response was produced. Order is preserved.
+//
+// Tool is optional metadata describing which MCP tool produced the
+// observation (e.g. "get_context_for_file"). The in-memory Session
+// ignores it; the persistent variant (Phase 14) uses it as the Subject
+// of the ToolCall observation it writes to the graph.
 type Observation struct {
 	Refs []string
 	At   time.Time
+	Tool string
 }
 
 // Session is the read+write interface to one client's session state.
