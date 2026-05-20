@@ -70,6 +70,7 @@ func newRootCmd() *cobra.Command {
 		newDecisionCmd(),
 		newHistoryCmd(),
 		newSessionsCmd(),
+		newStatsCmd(),
 	)
 
 	return root
