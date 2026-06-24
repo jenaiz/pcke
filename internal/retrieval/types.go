@@ -138,4 +138,10 @@ type ContextPackage struct {
 	// Truncated is true when at least one candidate was excluded
 	// because adding it would have crossed BudgetLimit.
 	Truncated bool
+	// Anticipated holds the refs of the focus file's direct (1-hop)
+	// graph neighbours that were not already admitted as Sections
+	// (PRD v5.2 §6.2 F15.T4). It is a lightweight "you may want these
+	// next" pre-load: refs only, no bodies, so it costs no budget. The
+	// JSON tag mirrors the field name agents look for.
+	Anticipated []string `json:"_anticipated,omitempty"`
 }

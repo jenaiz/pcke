@@ -143,7 +143,54 @@ func (e *Engine) Assemble(ctx context.Context, req Request) (*ContextPackage, er
 	for _, s := range admitted {
 		pkg.TokensUsed += s.Tokens
 	}
+	pkg.Anticipated = e.anticipate(ctx, files, admitted)
 	return pkg, nil
+}
+
+// anticipate returns the refs of the focus files' direct (1-hop)
+// neighbours that are not already admitted as sections — the
+// anticipatory pre-load (PRD v5.2 §6.2 F15.T4). The result is a
+// deterministic, lexically-sorted ref list carrying no bodies, so it
+// costs no budget.
+//
+// Best-effort: a traversal error for any single file is skipped rather
+// than failing assembly, since anticipation is an optimisation.
+func (e *Engine) anticipate(ctx context.Context, files []string, admitted []Section) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	served := make(map[string]struct{}, len(admitted)+len(files))
+	for _, s := range admitted {
+		served[s.Ref] = struct{}{}
+	}
+	// The focus files themselves are "already in context"; never
+	// anticipate them.
+	for _, f := range files {
+		served["e:"+f] = struct{}{}
+	}
+
+	opts := graph.TraversalOptions{Direction: graph.Both, MaxDepth: 1}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, f := range files {
+		neighbours, err := graph.Neighbors(ctx, e.db, graph.Ref("e:"+f), opts)
+		if err != nil {
+			continue
+		}
+		for _, n := range neighbours {
+			ref := string(n)
+			if _, dup := served[ref]; dup {
+				continue
+			}
+			if _, dup := seen[ref]; dup {
+				continue
+			}
+			seen[ref] = struct{}{}
+			out = append(out, ref)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // collectCandidateRefs traverses the graph from each file in both
