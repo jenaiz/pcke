@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "name": "go-practices-validation",
+  "description": "Hooks for Go best practices validation at commit and push lifecycle events",
+  "hooks": [
+    {
+      "name": "pre-commit-quick",
+      "trigger": "PreCommit",
+      "description": "Run fast linting and tests before commit (lint + test-short)",
+      "command": ".github/hooks/validate-go-practices.sh quick",
+      "blocking": true,
+      "runIf": ["modified: **/*.go"]
+    },
+    {
+      "name": "pre-push-comprehensive",
+      "trigger": "PrePush",
+      "description": "Run comprehensive checks before push (lint, test, race, benchmarks)",
+      "command": ".github/hooks/validate-go-practices.sh full",
+      "blocking": true,
+      "runIf": ["modified: **/*.go"]
+    },
+    {
+      "name": "pre-push-race",
+      "trigger": "PrePush",
+      "description": "Run race detector before push (catches data races)",
+      "command": ".github/hooks/validate-go-practices.sh race",
+      "blocking": true,
+      "runIf": ["modified: **/*.go"]
+    }
+  ],
+  "metadata": {
+    "version": "1.0.0",
+    "author": "pcke-team",
+    "skill": "Go Senior Engineer Best Practices",
+    "reference": ".github/SKILL_go_best_practices.md",
+    "modeGuide": {
+      "quick": "Lint + fast tests (pre-commit, ~1-2 seconds)",
+      "full": "Lint, test, race, benchmarks (pre-push, ~15-30 seconds)",
+      "race": "Lint, test, race detector (pre-push, ~5-10 seconds)",
+      "benchmarks": "Lint, test, BenchmarkCritical* (pre-push, ~10-15 seconds)"
+    }
+  }
+}
