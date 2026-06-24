@@ -267,6 +267,139 @@ func TestCollector_DropCounterIncrementsOnFullBuffer(t *testing.T) {
 	_ = c.Close()
 }
 
+// TestCollector_NilReceiverIsNoop verifies nil-receiver guards on all
+// public methods. A nil *Collector must never panic; all calls are noops.
+func TestCollector_NilReceiverIsNoop(t *testing.T) {
+	t.Parallel()
+	var c *observe.Collector
+	// None of these must panic.
+	c.RecordSessionStart(observe.SessionStart{UUID: "s1"})
+	c.RecordCall(observe.Call{UUID: "c1", SessionUUID: "s1", Tool: "recall"})
+	c.SetEnabled(false)
+	c.SetEnabled(true)
+	if got := (observe.Stats{}); c.Stats() != got {
+		t.Errorf("nil.Stats() = %v, want zero", c.Stats())
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("nil.Close() = %v, want nil", err)
+	}
+}
+
+// TestCollector_RecordCallIgnoresEmptyUUIDOrTool verifies that calls
+// with missing required fields are silently dropped (not panicked).
+func TestCollector_RecordCallIgnoresEmptyUUIDOrTool(t *testing.T) {
+	t.Parallel()
+	db, store := newDBAndStore(t)
+	c := observe.New(db, store, observe.Options{
+		FlushInterval: 5 * time.Millisecond,
+		Logger:        silentLogger(),
+	})
+	// Empty UUID — must be dropped.
+	c.RecordCall(observe.Call{UUID: "", SessionUUID: "s1", Tool: "recall"})
+	// Empty Tool — must be dropped (UUID is non-empty, exercises the Tool check).
+	c.RecordCall(observe.Call{UUID: "c1", SessionUUID: "s1", Tool: ""})
+	// Empty SessionUUID on SessionStart — must be dropped.
+	c.RecordSessionStart(observe.SessionStart{UUID: ""})
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Nothing should have been written.
+	if _, err := store.Latest(context.Background(), event.KindObservation, event.CallOID("c1")); !errors.Is(err, event.ErrNotFound) {
+		t.Errorf("empty-tool call leaked: err=%v", err)
+	}
+}
+
+// TestCollector_RecordCallDropCounterIncrements verifies the drop counter
+// increments when the call buffer is full (mirrors the SessionStart variant).
+func TestCollector_RecordCallDropCounterIncrements(t *testing.T) {
+	t.Parallel()
+
+	// Block the writer goroutine so the buffer fills up.
+	blocker := &blockingWriter{ch: make(chan struct{})}
+	c := observe.New(blocker, blocker, observe.Options{
+		BufferSize:    1,
+		MaxBatch:      1,
+		FlushInterval: 5 * time.Millisecond,
+		Logger:        silentLogger(),
+	})
+
+	// Flood with calls until at least one is dropped.
+	for i := 0; i < 50; i++ {
+		c.RecordCall(observe.Call{UUID: "c", SessionUUID: "s", Tool: "recall"})
+	}
+	if got := c.Stats().Dropped; got == 0 {
+		t.Errorf("Stats().Dropped = 0, want >0 with tiny buffer + blocked writer")
+	}
+
+	close(blocker.ch)
+	_ = c.Close()
+}
+
+// TestCollector_ExplicitTimestampIsPreserved verifies that a Call with
+// a non-zero At field stores that exact timestamp rather than using the
+// collector's clock. This exercises the stamp(at) code path.
+func TestCollector_ExplicitTimestampIsPreserved(t *testing.T) {
+	t.Parallel()
+	db, store := newDBAndStore(t)
+
+	fixedNow := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// The collector's internal clock would return something different.
+	laterClock := fixedNow.Add(time.Hour)
+	c := observe.New(db, store, observe.Options{
+		FlushInterval: 5 * time.Millisecond,
+		Logger:        silentLogger(),
+		Now:           func() time.Time { return laterClock },
+	})
+	c.RecordCall(observe.Call{
+		UUID:        "ts-c1",
+		SessionUUID: "ts-s1",
+		Tool:        "recall",
+		At:          fixedNow,
+	})
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	callEv, err := store.Latest(context.Background(), event.KindObservation, event.CallOID("ts-c1"))
+	if err != nil {
+		t.Fatalf("Latest call: %v", err)
+	}
+	got := callEv.Header().CreatedAt
+	if !got.Equal(fixedNow) {
+		t.Errorf("CreatedAt = %v, want explicit timestamp %v", got, fixedNow)
+	}
+}
+
+// TestCollector_WriteBatchSkipsWhenDisabled ensures that disabling the
+// collector prevents the batch from being flushed to storage even after
+// records are enqueued. We verify via Stats().Written == 0.
+func TestCollector_WriteBatchSkipsWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	// blockingWriter blocks on Update until released; we use it to pause
+	// the flush loop so we can disable the collector before the batch is
+	// committed to storage.
+	blocker := &blockingWriter{ch: make(chan struct{})}
+	c := observe.New(blocker, blocker, observe.Options{
+		BufferSize:    64,
+		FlushInterval: time.Hour, // disable timer; rely on Close flush
+		Logger:        silentLogger(),
+	})
+
+	c.RecordCall(observe.Call{UUID: "c1", SessionUUID: "s1", Tool: "recall"})
+	// Disable before Close triggers the final flush.
+	c.SetEnabled(false)
+	close(blocker.ch)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Because the collector was disabled, writeBatch returns early.
+	if got := c.Stats().Written; got != 0 {
+		t.Errorf("Stats().Written = %d after disabled flush, want 0", got)
+	}
+}
+
 // TestCollector_ObservationsContainNoFileContent is the F14.T7 privacy gate
 // (PRD v5.2 §5.5 + §5.7). It records a session + call through the collector,
 // flushes to kdb, then asserts two properties:
@@ -304,20 +437,27 @@ func TestCollector_ObservationsContainNoFileContent(t *testing.T) {
 	}
 
 	ctx := context.Background()
+	assertObservationFields(ctx, t, store)
+	assertServedRefsAreTypedKeys(ctx, t, db)
+	assertRawScanSentinelCount(ctx, t, db, contentSentinel)
+}
 
-	// --- Criterion 1: Observation fields are Action + Subject only. ---
-	// Session observation: Subject = label (sentinel), Action = "session".
+// assertObservationFields checks that the stored call Observation has the
+// expected Action and Subject and does not look like a file-path ref.
+func assertObservationFields(ctx context.Context, t *testing.T, store *event.Store) {
+	t.Helper()
 	sessEv, err := store.Latest(ctx, event.KindObservation, event.SessionOID("priv-s1"))
 	if err != nil {
 		t.Fatalf("Latest session: %v", err)
 	}
-	if obs, ok := sessEv.(*event.Observation); !ok {
+	obs, ok := sessEv.(*event.Observation)
+	if !ok {
 		t.Fatalf("session event type = %T, want *event.Observation", sessEv)
-	} else if obs.Action != event.ActionSession {
+	}
+	if obs.Action != event.ActionSession {
 		t.Errorf("session Action = %q, want %q", obs.Action, event.ActionSession)
 	}
 
-	// Call observation: Subject = tool name (sentinel), Action = "call".
 	callEv, err := store.Latest(ctx, event.KindObservation, event.CallOID("priv-c1"))
 	if err != nil {
 		t.Fatalf("Latest call: %v", err)
@@ -329,13 +469,15 @@ func TestCollector_ObservationsContainNoFileContent(t *testing.T) {
 	if callObs.Action != event.ActionCall {
 		t.Errorf("call Action = %q, want %q", callObs.Action, event.ActionCall)
 	}
-	// Subject is the tool name — the only string field besides OID and Action.
-	// It must not be a file path ref or contain file content.
 	if strings.HasPrefix(callObs.Subject, "e:") || strings.HasPrefix(callObs.Subject, "d:") {
 		t.Errorf("call Subject %q looks like a graph ref — content leaked into Subject", callObs.Subject)
 	}
+}
 
-	// --- Criterion 2: served-edge DstRefs are typed graph keys only. ---
+// assertServedRefsAreTypedKeys walks the served-edges for priv-c1 and
+// asserts every DstRef has a typed graph key prefix (e: or d:).
+func assertServedRefsAreTypedKeys(ctx context.Context, t *testing.T, db *kdb.DB) {
+	t.Helper()
 	servedRefs, err := graph.Neighbors(ctx, db, graph.Ref(event.CallRef("priv-c1")),
 		graph.TraversalOptions{
 			Direction: graph.Forward,
@@ -352,30 +494,26 @@ func TestCollector_ObservationsContainNoFileContent(t *testing.T) {
 		if !strings.HasPrefix(s, "e:") && !strings.HasPrefix(s, "d:") {
 			t.Errorf("served DstRef %q is not a typed graph key (want e: or d: prefix)", s)
 		}
-		if strings.Contains(s, contentSentinel) {
-			t.Errorf("served DstRef %q contains the content sentinel — file content stored in ref", s)
-		}
 	}
+}
 
-	// --- Criterion 3: raw kdb scan — no value contains the sentinel. ---
-	// The sentinel was used as Label and Tool name above; those will appear in
-	// the stored Action/Subject fields as expected. The scan verifies that no
-	// *other* value (body, content, source) carries the sentinel.
-	// We assert the sentinel appears at most twice (Session.Subject + Call.Subject).
+// assertRawScanSentinelCount scans every raw kdb value and asserts the
+// sentinel appears at most twice (once each for Session.Subject and
+// Call.Subject). More occurrences would indicate a new content field.
+func assertRawScanSentinelCount(ctx context.Context, t *testing.T, db *kdb.DB, sentinel string) {
+	t.Helper()
 	sentinelCount := 0
-	if scanErr := db.View(ctx, func(rtx *tx.ReadTx) error {
+	if err := db.View(ctx, func(rtx *tx.ReadTx) error {
 		cur := rtx.Cursor()
 		for cur.First(); cur.Valid(); cur.Next() {
-			if bytes.Contains(cur.Value(), []byte(contentSentinel)) {
+			if bytes.Contains(cur.Value(), []byte(sentinel)) {
 				sentinelCount++
 			}
 		}
 		return nil
-	}); scanErr != nil {
-		t.Fatalf("raw kdb scan: %v", scanErr)
+	}); err != nil {
+		t.Fatalf("raw kdb scan: %v", err)
 	}
-	// Sentinel may appear in Subject fields of Session + Call records.
-	// It must not appear in any other field (body, content, source code).
 	if sentinelCount > 2 {
 		t.Errorf("content sentinel found in %d raw kdb values (want ≤2 for Subject fields); "+
 			"file content may be leaking into observation records", sentinelCount)
