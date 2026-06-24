@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 	"github.com/jenaiz/pcke/internal/output"
+	"github.com/jenaiz/pcke/internal/retrieval"
 	"github.com/jenaiz/pcke/internal/retrieval/session"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -27,12 +29,24 @@ type Server struct {
 	prompts   []mcpserver.ServerPrompt
 	broker    *Broker
 	sessions  *session.MemoryStore
+
+	// workflowMu guards workflows, the per-session workflow set via the
+	// set_workflow tool (F15.T6). Context tools inherit it when their
+	// own workflow parameter is empty.
+	workflowMu sync.Mutex
+	workflows  map[string]retrieval.Workflow
 }
 
 // New creates a [Server] backed by the given kdb database.
 // All tools and resources are read-only.
 func New(db *kdb.DB, root string) *Server {
-	s := &Server{db: db, root: root, broker: NewBroker(), sessions: session.NewMemoryStore()}
+	s := &Server{
+		db:        db,
+		root:      root,
+		broker:    NewBroker(),
+		sessions:  session.NewMemoryStore(),
+		workflows: make(map[string]retrieval.Workflow),
+	}
 
 	s.srv = mcpserver.NewMCPServer(
 		"pcke",

@@ -217,6 +217,35 @@ func TestRecallNoResults(t *testing.T) {
 	}
 }
 
+func TestSetWorkflowTool(t *testing.T) {
+	db := seedDB(t)
+	defer func() { _ = db.Close() }()
+
+	ts := startTestServer(t, db)
+
+	// Valid workflow is accepted and echoed back.
+	text := callTool(t, ts, "set_workflow", map[string]any{
+		"session_id": "sess-1",
+		"workflow":   "review",
+	})
+	var out map[string]any
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("set_workflow result not JSON: %v (%s)", err, text)
+	}
+	if out["ok"] != true || out["workflow"] != "review" {
+		t.Errorf("set_workflow result = %v, want ok review", out)
+	}
+
+	// Unknown workflow is rejected with an error message.
+	bad := callTool(t, ts, "set_workflow", map[string]any{
+		"session_id": "sess-1",
+		"workflow":   "nonsense",
+	})
+	if !strings.Contains(bad, "unknown workflow") {
+		t.Errorf("expected unknown-workflow error, got: %s", bad)
+	}
+}
+
 func TestGetModuleContext(t *testing.T) {
 	db := seedDB(t)
 	defer func() { _ = db.Close() }()

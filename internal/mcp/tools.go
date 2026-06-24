@@ -149,6 +149,108 @@ func (s *Server) registerTools() {
 			mcplib.Description("Opaque session identifier; paired with already_served for novelty tracking"),
 		),
 	), s.handleGetContextForFile)
+
+	// set_workflow — record the caller's current workflow on a session so
+	// subsequent context tools inherit it without re-specifying (F15.T6).
+	s.srv.AddTool(mcplib.NewTool("set_workflow",
+		mcplib.WithDescription("Set the active workflow for a session. Subsequent get_context_for_file / get_context_for_diff calls on the same session inherit it (unless they pass their own workflow). Tunes ranker weights and edge priorities."),
+		mcplib.WithString("session_id",
+			mcplib.Required(),
+			mcplib.Description("Opaque session identifier the workflow applies to"),
+		),
+		mcplib.WithString("workflow",
+			mcplib.Required(),
+			mcplib.Description("One of: explore | bugfix | feature | review | refactor | test"),
+		),
+	), s.handleSetWorkflow)
+}
+
+// handleSetWorkflow records the caller's workflow on a session so later
+// context tools inherit it. Returns the stored workflow as JSON.
+func (s *Server) handleSetWorkflow(
+	_ context.Context,
+	request mcplib.CallToolRequest,
+) (*mcplib.CallToolResult, error) {
+	sessionID, err := request.RequireString("session_id")
+	if err != nil {
+		return mcplib.NewToolResultError("session_id parameter required"), nil
+	}
+	wfRaw, err := request.RequireString("workflow")
+	if err != nil {
+		return mcplib.NewToolResultError("workflow parameter required"), nil
+	}
+	wf, ok := parseWorkflow(wfRaw)
+	if !ok {
+		return mcplib.NewToolResultError(fmt.Sprintf(
+			"unknown workflow %q; want one of: explore bugfix feature review refactor test", wfRaw)), nil
+	}
+
+	s.setSessionWorkflow(sessionID, wf)
+
+	out, _ := json.Marshal(map[string]any{
+		"session_id": sessionID,
+		"workflow":   string(wf),
+		"ok":         true,
+	})
+	return mcplib.NewToolResultText(string(out)), nil
+}
+
+// parseWorkflow validates a workflow string against the known set,
+// returning the typed value and whether it was recognised. Empty maps
+// to WorkflowExplore.
+func parseWorkflow(s string) (retrieval.Workflow, bool) {
+	switch retrieval.Workflow(strings.ToLower(strings.TrimSpace(s))) {
+	case retrieval.WorkflowExplore, "":
+		return retrieval.WorkflowExplore, true
+	case retrieval.WorkflowBugfix:
+		return retrieval.WorkflowBugfix, true
+	case retrieval.WorkflowFeature:
+		return retrieval.WorkflowFeature, true
+	case retrieval.WorkflowReview:
+		return retrieval.WorkflowReview, true
+	case retrieval.WorkflowRefactor:
+		return retrieval.WorkflowRefactor, true
+	case retrieval.WorkflowTest:
+		return retrieval.WorkflowTest, true
+	default:
+		return "", false
+	}
+}
+
+// setSessionWorkflow records wf for sessionID. Empty sessionID is a
+// no-op (anonymous calls can't inherit a workflow).
+func (s *Server) setSessionWorkflow(sessionID string, wf retrieval.Workflow) {
+	if sessionID == "" {
+		return
+	}
+	s.workflowMu.Lock()
+	s.workflows[sessionID] = wf
+	s.workflowMu.Unlock()
+}
+
+// sessionWorkflow returns the workflow stored for sessionID, or empty
+// (WorkflowExplore semantics) when none is set.
+func (s *Server) sessionWorkflow(sessionID string) retrieval.Workflow {
+	if sessionID == "" {
+		return ""
+	}
+	s.workflowMu.Lock()
+	defer s.workflowMu.Unlock()
+	return s.workflows[sessionID]
+}
+
+// resolveWorkflow picks the effective workflow for a context call: an
+// explicit per-call parameter wins; otherwise the session's stored
+// workflow (set via set_workflow) applies.
+func (s *Server) resolveWorkflow(sessionID, param string) retrieval.Workflow {
+	if w, ok := parseWorkflow(param); ok && w != retrieval.WorkflowExplore {
+		return w
+	}
+	// param was empty or explicitly "explore": fall back to the session.
+	if strings.TrimSpace(param) == "" {
+		return s.sessionWorkflow(sessionID)
+	}
+	return retrieval.WorkflowExplore
 }
 
 // handleRecall performs a text search over knowledge nodes.
@@ -694,7 +796,7 @@ func (s *Server) handleGetContextForDiff(
 	req := retrieval.Request{
 		ChangedFiles:  changed,
 		Budget:        int(request.GetFloat("budget", 0)),
-		Workflow:      retrieval.Workflow(request.GetString("workflow", "")),
+		Workflow:      s.resolveWorkflow(sessionID, request.GetString("workflow", "")),
 		Focus:         retrieval.Focus(request.GetString("focus", "")),
 		SessionID:     sessionID,
 		AlreadyServed: served,
@@ -797,7 +899,7 @@ func (s *Server) handleGetContextForFile(
 	req := retrieval.Request{
 		FilePath:      filePath,
 		Budget:        int(request.GetFloat("budget", 0)),
-		Workflow:      retrieval.Workflow(request.GetString("workflow", "")),
+		Workflow:      s.resolveWorkflow(sessionID, request.GetString("workflow", "")),
 		Focus:         retrieval.Focus(request.GetString("focus", "")),
 		SessionID:     sessionID,
 		AlreadyServed: served,
