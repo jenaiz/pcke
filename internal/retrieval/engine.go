@@ -108,9 +108,10 @@ func (e *Engine) Assemble(ctx context.Context, req Request) (*ContextPackage, er
 		return pkg, nil
 	}
 
-	if !nearlyOne(e.weights.Sum()) {
+	prof := e.effectiveProfile(req)
+	if !nearlyOne(prof.Weights.Sum()) {
 		pkg.Warnings = append(pkg.Warnings,
-			fmt.Sprintf("weights sum to %.3f, not 1.0; scores may exceed [0, 1]", e.weights.Sum()))
+			fmt.Sprintf("weights sum to %.3f, not 1.0; scores may exceed [0, 1]", prof.Weights.Sum()))
 	}
 
 	refs, err := e.collectCandidateRefs(ctx, files)
@@ -123,7 +124,7 @@ func (e *Engine) Assemble(ctx context.Context, req Request) (*ContextPackage, er
 		return pkg, nil
 	}
 
-	sections, err := e.scoreAndShape(ctx, req, refs)
+	sections, err := e.scoreAndShape(ctx, req, prof, refs)
 	if err != nil {
 		return pkg, fmt.Errorf("retrieval: score: %w", err)
 	}
@@ -233,10 +234,10 @@ func (e *Engine) collectCandidateRefs(ctx context.Context, files []string) ([]gr
 // scores it, and shapes a Section. Refs that fail to resolve are
 // silently skipped so a partially-populated event log doesn't block
 // retrieval; callers can detect emptiness via len(Sections) == 0.
-func (e *Engine) scoreAndShape(ctx context.Context, req Request, refs []graph.Ref) ([]Section, error) {
+func (e *Engine) scoreAndShape(ctx context.Context, req Request, prof WorkflowProfile, refs []graph.Ref) ([]Section, error) {
 	store := event.New(e.db)
 	now := e.now()
-	priority := e.priorityRefs(ctx, requestFiles(req))
+	priority := e.priorityRefs(ctx, prof, requestFiles(req))
 	sections := make([]Section, 0, len(refs))
 
 	for _, ref := range refs {
@@ -251,9 +252,9 @@ func (e *Engine) scoreAndShape(ctx context.Context, req Request, refs []graph.Re
 			}
 			return nil, fmt.Errorf("latest %q: %w", ref, err)
 		}
-		score := Score(now, req, evt, e.weights)
+		score := Score(now, req, evt, prof.Weights)
 		if _, boosted := priority[ref]; boosted {
-			score = clampScore(score + e.edgeBoost)
+			score = clampScore(score + prof.EdgeBoost)
 		}
 		s := shapeSection(evt, score)
 		sections = append(sections, s)
@@ -261,22 +262,38 @@ func (e *Engine) scoreAndShape(ctx context.Context, req Request, refs []graph.Re
 	return sections, nil
 }
 
+// effectiveProfile resolves which WorkflowProfile governs a request.
+// A non-empty req.Workflow takes precedence (per-call override, used by
+// the MCP tools and `pcke context`); otherwise the engine's
+// construction-time configuration (WithWorkflow / WithWeights) applies.
+func (e *Engine) effectiveProfile(req Request) WorkflowProfile {
+	if req.Workflow != "" {
+		return ProfileFor(req.Workflow)
+	}
+	return WorkflowProfile{
+		Workflow:     WorkflowExplore,
+		Weights:      e.weights,
+		EdgePriority: e.edgePriority,
+		EdgeBoost:    e.edgeBoost,
+	}
+}
+
 // priorityRefs returns the set of refs that are 1-hop neighbours of any
-// request file via one of the engine's priority edge types (set by
-// WithWorkflow). The returned refs receive an edge boost in scoring.
+// request file via one of the profile's priority edge types. The
+// returned refs receive an edge boost in scoring.
 //
 // Best-effort: traversal errors for an individual edge type or file are
 // skipped rather than failing the whole assembly, since the boost is an
 // optimisation, not a correctness requirement.
-func (e *Engine) priorityRefs(ctx context.Context, files []string) map[graph.Ref]struct{} {
-	if len(e.edgePriority) == 0 || e.edgeBoost == 0 || len(files) == 0 {
+func (e *Engine) priorityRefs(ctx context.Context, prof WorkflowProfile, files []string) map[graph.Ref]struct{} {
+	if len(prof.EdgePriority) == 0 || prof.EdgeBoost == 0 || len(files) == 0 {
 		return nil
 	}
 	out := make(map[graph.Ref]struct{})
 	opts := graph.TraversalOptions{
 		Direction: graph.Forward,
 		MaxDepth:  1,
-		EdgeTypes: e.edgePriority,
+		EdgeTypes: prof.EdgePriority,
 	}
 	for _, f := range files {
 		neighbours, err := graph.Neighbors(ctx, e.db, graph.Ref("e:"+f), opts)

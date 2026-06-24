@@ -112,3 +112,39 @@ func TestWithWorkflow_ExploreUsesDefaultWeights(t *testing.T) {
 		t.Errorf("explore dep score %v != default %v; explore must be neutral", got, want)
 	}
 }
+
+// TestRequestWorkflow_OverridesEngineDefault verifies a per-call
+// req.Workflow takes effect even on a default engine constructed
+// without WithWorkflow — the path the MCP tools and `pcke context`
+// rely on.
+func TestRequestWorkflow_OverridesEngineDefault(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.addEntity(t, "f.go", "f.go", "file")
+	f.addEntity(t, "dep.go", "dep.go", "file")
+	f.addLink(t, "e:f.go", "imports", "e:dep.go")
+
+	clock := retrieval.WithClock(func() time.Time { return f.now })
+	eng := retrieval.New(f.db, clock) // no WithWorkflow
+
+	explorePkg, err := eng.Assemble(context.Background(), retrieval.Request{
+		FilePath: "f.go", Budget: 100000, Workflow: retrieval.WorkflowExplore,
+	})
+	if err != nil {
+		t.Fatalf("explore Assemble: %v", err)
+	}
+	refactorPkg, err := eng.Assemble(context.Background(), retrieval.Request{
+		FilePath: "f.go", Budget: 100000, Workflow: retrieval.WorkflowRefactor,
+	})
+	if err != nil {
+		t.Fatalf("refactor Assemble: %v", err)
+	}
+
+	// Refactor prioritises imports, so dep.go (reached via imports) should
+	// score higher than under explore — proving the per-call workflow took
+	// effect on a default engine.
+	if refactorPkg := scoreOf(refactorPkg, "e:dep.go"); refactorPkg <= scoreOf(explorePkg, "e:dep.go") {
+		t.Errorf("per-request refactor dep score %v should exceed explore %v",
+			refactorPkg, scoreOf(explorePkg, "e:dep.go"))
+	}
+}
