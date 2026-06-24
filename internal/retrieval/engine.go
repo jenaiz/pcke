@@ -24,9 +24,11 @@ const defaultMaxDepth = 2
 // Engines are cheap to construct and safe to share across goroutines:
 // every Assemble call uses its own kdb View transaction.
 type Engine struct {
-	db      *kdb.DB
-	weights Weights
-	now     func() time.Time
+	db           *kdb.DB
+	weights      Weights
+	edgePriority []string
+	edgeBoost    float64
+	now          func() time.Time
 }
 
 // Option configures an Engine.
@@ -37,6 +39,20 @@ type Option func(*Engine)
 // returned ContextPackage.
 func WithWeights(w Weights) Option {
 	return func(e *Engine) { e.weights = w }
+}
+
+// WithWorkflow applies the WorkflowProfile for w (PRD v5.2 §6.2
+// F15.T2): it sets the engine's scoring weights and the priority-edge
+// boost. WorkflowExplore (or an unknown value) yields the neutral
+// baseline. WithWorkflow should appear before WithWeights if a caller
+// wants to further override the workflow's weights.
+func WithWorkflow(w Workflow) Option {
+	return func(e *Engine) {
+		p := ProfileFor(w)
+		e.weights = p.Weights
+		e.edgePriority = p.EdgePriority
+		e.edgeBoost = p.EdgeBoost
+	}
 }
 
 // WithClock injects a deterministic time source. Production callers
@@ -173,6 +189,7 @@ func (e *Engine) collectCandidateRefs(ctx context.Context, files []string) ([]gr
 func (e *Engine) scoreAndShape(ctx context.Context, req Request, refs []graph.Ref) ([]Section, error) {
 	store := event.New(e.db)
 	now := e.now()
+	priority := e.priorityRefs(ctx, requestFiles(req))
 	sections := make([]Section, 0, len(refs))
 
 	for _, ref := range refs {
@@ -187,10 +204,56 @@ func (e *Engine) scoreAndShape(ctx context.Context, req Request, refs []graph.Re
 			}
 			return nil, fmt.Errorf("latest %q: %w", ref, err)
 		}
-		s := shapeSection(evt, Score(now, req, evt, e.weights))
+		score := Score(now, req, evt, e.weights)
+		if _, boosted := priority[ref]; boosted {
+			score = clampScore(score + e.edgeBoost)
+		}
+		s := shapeSection(evt, score)
 		sections = append(sections, s)
 	}
 	return sections, nil
+}
+
+// priorityRefs returns the set of refs that are 1-hop neighbours of any
+// request file via one of the engine's priority edge types (set by
+// WithWorkflow). The returned refs receive an edge boost in scoring.
+//
+// Best-effort: traversal errors for an individual edge type or file are
+// skipped rather than failing the whole assembly, since the boost is an
+// optimisation, not a correctness requirement.
+func (e *Engine) priorityRefs(ctx context.Context, files []string) map[graph.Ref]struct{} {
+	if len(e.edgePriority) == 0 || e.edgeBoost == 0 || len(files) == 0 {
+		return nil
+	}
+	out := make(map[graph.Ref]struct{})
+	opts := graph.TraversalOptions{
+		Direction: graph.Forward,
+		MaxDepth:  1,
+		EdgeTypes: e.edgePriority,
+	}
+	for _, f := range files {
+		neighbours, err := graph.Neighbors(ctx, e.db, graph.Ref("e:"+f), opts)
+		if err != nil {
+			continue
+		}
+		for _, n := range neighbours {
+			out[n] = struct{}{}
+		}
+	}
+	return out
+}
+
+// clampScore bounds s to [0, 1] so an edge boost can't push a section
+// above the engine's documented score range.
+func clampScore(s float64) float64 {
+	switch {
+	case s < 0:
+		return 0
+	case s > 1:
+		return 1
+	default:
+		return s
+	}
 }
 
 // shapeSection turns one event + its score into a Section, computing
