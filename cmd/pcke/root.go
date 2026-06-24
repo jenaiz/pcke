@@ -71,6 +71,7 @@ func newRootCmd() *cobra.Command {
 		newHistoryCmd(),
 		newSessionsCmd(),
 		newStatsCmd(),
+		newContextCmd(),
 	)
 
 	return root
