@@ -13,10 +13,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/event"
 	"github.com/jenaiz/pcke/internal/kdb/graph"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
+	pckelog "github.com/jenaiz/pcke/internal/log"
 )
 
 // newSessionsCmd builds the `pcke sessions` subtree (Phase 14 F14.T4):
@@ -524,6 +526,45 @@ func parseSinceFlag(s string) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return time.Now().UTC().Add(-d), nil
+}
+
+// runRetentionPrune drops sessions older than [telemetry] retention_days.
+// Invoked from `pcke serve` startup; runs in a goroutine so it does not
+// delay the MCP listener. Errors are logged via slog and not surfaced
+// to the user — retention is best-effort.
+//
+// retention_days = 0 (and `telemetry.disabled = true`) disables the prune
+// entirely; users can still run `pcke sessions clear` manually.
+func runRetentionPrune(cwd string, db *kdb.DB) {
+	logger := pckelog.Logger("telemetry.retention")
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		logger.Warn("config load failed; skipping prune", "err", err)
+		return
+	}
+	if cfg.Telemetry.Disabled || cfg.Telemetry.RetentionDays <= 0 {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(cfg.Telemetry.RetentionDays) * 24 * time.Hour)
+
+	go func() {
+		ctx := context.Background()
+		victims, vErr := collectSessionVictims(ctx, db, false, cutoff)
+		if vErr != nil {
+			logger.Warn("retention scan failed", "err", vErr)
+			return
+		}
+		if len(victims) == 0 {
+			return
+		}
+		if dErr := deleteSessionVictims(ctx, db, victims); dErr != nil {
+			logger.Warn("retention delete failed", "err", dErr, "victim_count", len(victims))
+			return
+		}
+		logger.Info("retention prune complete",
+			"victims", len(victims),
+			"retention_days", cfg.Telemetry.RetentionDays)
+	}()
 }
 
 // parseHumanDuration extends time.ParseDuration with a "d" (day) and

@@ -243,3 +243,70 @@ func TestSessionsShow_ReportsNotFound(t *testing.T) {
 		t.Errorf("runSessionsShow(nonexistent) err = %v, want \"not found\"", err)
 	}
 }
+
+// writeConfigToml writes a minimal repo-level config so config.Load
+// picks up our retention override.
+func writeConfigToml(t *testing.T, dir, body string) {
+	t.Helper()
+	cfgDir := dir + "/.pcke"
+	if err := os.MkdirAll(cfgDir, 0o750); err != nil {
+		t.Fatalf("mkdir .pcke: %v", err)
+	}
+	if err := os.WriteFile(cfgDir+"/config.toml", []byte(body), 0o600); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+}
+
+func TestRetentionPrune_DropsStaleSessionsOnStartup(t *testing.T) {
+	dir := t.TempDir()
+	seedSessions(t, dir)
+	writeConfigToml(t, dir, "[telemetry]\nretention_days = 7\n")
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("kdb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	runRetentionPrune(dir, db)
+	// The prune runs in a goroutine; wait for it deterministically by
+	// polling collectSessions until either the stale one is gone or we
+	// hit a timeout.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := collectSessions(context.Background(), db, event.New(db), time.Time{})
+		if err != nil {
+			t.Fatalf("collectSessions: %v", err)
+		}
+		if len(rows) == 1 && rows[0].uuid == "fresh-uuid" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	rows, _ := collectSessions(context.Background(), db, event.New(db), time.Time{})
+	t.Fatalf("retention prune did not drop stale session within deadline; remaining=%+v", rows)
+}
+
+func TestRetentionPrune_DisabledKeepsSessions(t *testing.T) {
+	dir := t.TempDir()
+	seedSessions(t, dir)
+	writeConfigToml(t, dir, "[telemetry]\nretention_days = 0\n")
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("kdb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	runRetentionPrune(dir, db)
+	// Give any goroutine a moment to misbehave; then verify both
+	// sessions are still present.
+	time.Sleep(200 * time.Millisecond)
+	rows, err := collectSessions(context.Background(), db, event.New(db), time.Time{})
+	if err != nil {
+		t.Fatalf("collectSessions: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("after disabled retention, sessions = %d, want 2", len(rows))
+	}
+}

@@ -1393,6 +1393,10 @@ Examples:
 			}
 			defer func() { _ = db.Close() }()
 
+			// Phase 14 F14.T6 — run the retention prune in the background
+			// on startup. Failures are logged but do not block serving.
+			runRetentionPrune(cwd, db)
+
 			srv := mcp.New(db, cwd)
 			return srv.Serve()
 		},

@@ -19,10 +19,11 @@ import (
 
 // Config holds the merged configuration values.
 type Config struct {
-	Scan ScanConfig `toml:"scan"`
-	KDB  KDBConfig  `toml:"kdb"`
-	FTS  FTSConfig  `toml:"fts"`
-	MCP  MCPConfig  `toml:"mcp"`
+	Scan      ScanConfig      `toml:"scan"`
+	KDB       KDBConfig       `toml:"kdb"`
+	FTS       FTSConfig       `toml:"fts"`
+	MCP       MCPConfig       `toml:"mcp"`
+	Telemetry TelemetryConfig `toml:"telemetry"`
 }
 
 // ScanConfig holds scan-related settings.
@@ -56,6 +57,21 @@ type MCPConfig struct {
 	ChunkSize        int  `toml:"chunk_size"`
 }
 
+// TelemetryConfig holds Phase 14 observation settings. The collector
+// writes Session/ToolCall observations to the local kdb; nothing leaves
+// the machine.
+type TelemetryConfig struct {
+	// RetentionDays bounds how long Session/ToolCall observations are
+	// kept. Sessions older than RetentionDays * 24h are pruned on the
+	// next `pcke serve` startup. Default 30; set to 0 to disable the
+	// automatic prune (manual `pcke sessions clear` still works).
+	RetentionDays int `toml:"retention_days"`
+	// Disabled, when true, short-circuits the observation collector:
+	// the MCP server still serves tools but does not write any
+	// observations to the graph. Equivalent to `pcke telemetry off`.
+	Disabled bool `toml:"disabled"`
+}
+
 // Defaults returns a Config populated with default values.
 // See PRDs/PRD_PCKE_v3_1_EXECUTION_PLAN.md §9.2.
 func Defaults() Config {
@@ -79,6 +95,9 @@ func Defaults() Config {
 		},
 		MCP: MCPConfig{
 			ReadTimeoutS: 30,
+		},
+		Telemetry: TelemetryConfig{
+			RetentionDays: 30,
 		},
 	}
 }
@@ -140,47 +159,73 @@ func mergeFromFile(cfg *Config, path string) error {
 
 // mergeFromEnv applies PCKE_* environment variables.
 func mergeFromEnv(cfg *Config) {
+	mergeScanEnv(&cfg.Scan)
+	mergeKDBEnv(&cfg.KDB)
+	mergeFTSEnv(&cfg.FTS)
+	mergeMCPEnv(&cfg.MCP)
+	mergeTelemetryEnv(&cfg.Telemetry)
+}
+
+func mergeScanEnv(s *ScanConfig) {
 	if v := os.Getenv("PCKE_SCAN_REDACT_SECRETS"); v != "" {
-		cfg.Scan.RedactSecrets = envBool(v, cfg.Scan.RedactSecrets)
+		s.RedactSecrets = envBool(v, s.RedactSecrets)
 	}
 	if v := os.Getenv("PCKE_SCAN_INCLUDE_IGNORED"); v != "" {
-		cfg.Scan.IncludeIgnored = envBool(v, cfg.Scan.IncludeIgnored)
+		s.IncludeIgnored = envBool(v, s.IncludeIgnored)
 	}
 	if v := os.Getenv("PCKE_SCAN_MAX_FILE_BYTES"); v != "" {
-		cfg.Scan.MaxFileBytes = envInt64(v, cfg.Scan.MaxFileBytes)
+		s.MaxFileBytes = envInt64(v, s.MaxFileBytes)
 	}
+}
+
+func mergeKDBEnv(k *KDBConfig) {
 	if v := os.Getenv("PCKE_KDB_BUFFER_POOL_MB"); v != "" {
-		cfg.KDB.BufferPoolMB = envInt(v, cfg.KDB.BufferPoolMB)
+		k.BufferPoolMB = envInt(v, k.BufferPoolMB)
 	}
 	if v := os.Getenv("PCKE_KDB_WAL_SEGMENT_MB"); v != "" {
-		cfg.KDB.WALSegmentMB = envInt(v, cfg.KDB.WALSegmentMB)
+		k.WALSegmentMB = envInt(v, k.WALSegmentMB)
 	}
 	if v := os.Getenv("PCKE_KDB_CHECKPOINT_WAL_MB"); v != "" {
-		cfg.KDB.CheckpointWALMB = envInt(v, cfg.KDB.CheckpointWALMB)
+		k.CheckpointWALMB = envInt(v, k.CheckpointWALMB)
 	}
 	if v := os.Getenv("PCKE_KDB_CHECKPOINT_INTERVAL_SEC"); v != "" {
-		cfg.KDB.CheckpointIntervalS = envInt(v, cfg.KDB.CheckpointIntervalS)
+		k.CheckpointIntervalS = envInt(v, k.CheckpointIntervalS)
 	}
 	if v := os.Getenv("PCKE_KDB_GRACEFUL_SHUTDOWN_SEC"); v != "" {
-		cfg.KDB.GracefulShutdownS = envInt(v, cfg.KDB.GracefulShutdownS)
+		k.GracefulShutdownS = envInt(v, k.GracefulShutdownS)
 	}
+}
+
+func mergeFTSEnv(f *FTSConfig) {
 	if v := os.Getenv("PCKE_FTS_TOKENIZER_CJK_MODE"); v != "" {
-		cfg.FTS.TokenizerCJKMode = v
+		f.TokenizerCJKMode = v
 	}
 	if v := os.Getenv("PCKE_FTS_MERGE_TIER_THRESHOLD"); v != "" {
-		cfg.FTS.MergeTierThreshold = envInt(v, cfg.FTS.MergeTierThreshold)
+		f.MergeTierThreshold = envInt(v, f.MergeTierThreshold)
 	}
+}
+
+func mergeMCPEnv(m *MCPConfig) {
 	if v := os.Getenv("PCKE_MCP_READ_TIMEOUT_SEC"); v != "" {
-		cfg.MCP.ReadTimeoutS = envInt(v, cfg.MCP.ReadTimeoutS)
+		m.ReadTimeoutS = envInt(v, m.ReadTimeoutS)
 	}
 	if v := os.Getenv("PCKE_MCP_PROACTIVE_CONTEXT"); v != "" {
-		cfg.MCP.ProactiveContext = envBool(v, cfg.MCP.ProactiveContext)
+		m.ProactiveContext = envBool(v, m.ProactiveContext)
 	}
 	if v := os.Getenv("PCKE_MCP_STREAM_THRESHOLD"); v != "" {
-		cfg.MCP.StreamThreshold = envInt(v, cfg.MCP.StreamThreshold)
+		m.StreamThreshold = envInt(v, m.StreamThreshold)
 	}
 	if v := os.Getenv("PCKE_MCP_CHUNK_SIZE"); v != "" {
-		cfg.MCP.ChunkSize = envInt(v, cfg.MCP.ChunkSize)
+		m.ChunkSize = envInt(v, m.ChunkSize)
+	}
+}
+
+func mergeTelemetryEnv(t *TelemetryConfig) {
+	if v := os.Getenv("PCKE_TELEMETRY_RETENTION_DAYS"); v != "" {
+		t.RetentionDays = envInt(v, t.RetentionDays)
+	}
+	if v := os.Getenv("PCKE_TELEMETRY_DISABLED"); v != "" {
+		t.Disabled = envBool(v, t.Disabled)
 	}
 }
 
