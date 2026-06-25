@@ -227,10 +227,10 @@ cd /path/to/your-project
 | v0.8.0 | 7 | Schema Evolution | DONE (retag) |
 | v0.9.0 | 8 | Federation (**deprecated**) | DONE (retag) |
 | v0.9.1 | 11 | Pivot Reset | DONE |
-| **v0.10.0** | 12 | **Graph Foundation** | **CURRENT** — typed-event log, graph traversal, TRAVERSE/AS OF DSL, `pcke graph`/`decision`/`history` CLI |
-| v0.11.0 | 13 | Subgraph Retrieval | next |
-| v0.12.0 | 14 | Durable Sessions | planned |
-| v0.13.0 | 15 | Workflow Awareness | planned |
+| v0.10.0 | 12 | Graph Foundation | DONE — typed-event log, graph traversal, TRAVERSE/AS OF DSL, `pcke graph`/`decision`/`history` CLI |
+| v0.11.0 | 13 | Subgraph Retrieval | DONE |
+| v0.12.0 | 14 | Durable Sessions | DONE |
+| **v0.13.0** | 15 | **Workflow Awareness** | **DONE** — `set_workflow` MCP tool, recipes, anticipatory context, `pcke context` CLI |
 | **v1.0.0** | — | **Stable release: Durable Code Memory** | target |
 
 Phases 9 (Local Embeddings as bundled feature) and 10 (IDE Extensions) remain
