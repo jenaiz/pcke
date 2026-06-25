@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"github.com/jenaiz/pcke/internal/analysis/decisions"
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/btree"
+	"github.com/jenaiz/pcke/internal/kdb/event"
 	"github.com/jenaiz/pcke/internal/kdb/index"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
@@ -78,12 +81,20 @@ const (
 	// transaction so per-tx copy-on-write churn stays bounded on large repos.
 	relationBatchSize = 1000
 	// pagesPerRelation is the freelist headroom reserved per relation
-	// record (covers the record plus B+tree split / CoW churn).
-	pagesPerRelation = 4
+	// record. Each relation now persists both the legacy rel: record and
+	// an event-log link (l: forward + lr: reverse index), so the
+	// reservation covers all three records plus B+tree split / CoW churn.
+	pagesPerRelation = 8
 	// pagesPerDeepNode is the freelist headroom reserved per knowledge
 	// node when deep analysis embeds AST entities and imports, which makes
 	// each node payload substantially larger than a shallow scan.
 	pagesPerDeepNode = 8
+	// entityEventBatchSize bounds how many e: entity events are written
+	// per transaction so per-tx copy-on-write churn stays bounded.
+	entityEventBatchSize = 1000
+	// pagesPerEntityEvent is the freelist headroom reserved per e: entity
+	// event (the record plus B+tree split / CoW churn).
+	pagesPerEntityEvent = 4
 )
 
 // ScanResult summarises a completed scan.
@@ -237,11 +248,11 @@ func (s *Scanner) Scan(ctx context.Context, full bool) (*ScanResult, error) {
 		return nil, err
 	}
 
-	// Populate relations from import graph (deep mode only).
-	if s.deep {
-		if err := s.persistRelations(ctx, nodes, result); err != nil {
-			return nil, fmt.Errorf("analysis: persist relations: %w", err)
-		}
+	// Populate the typed-event graph (e: entities always; l: import
+	// links in deep mode) so graph/context/recall work natively after a
+	// scan, without a manual `pcke migrate`.
+	if err := s.persistGraph(ctx, nodes, result); err != nil {
+		return nil, err
 	}
 
 	// Detect renames and persist evolution logs.
@@ -436,14 +447,118 @@ func (s *Scanner) persistAll(ctx context.Context, nodes []*KnowledgeNode, headHa
 	})
 }
 
+// persistGraph populates the typed-event graph from the scanned nodes:
+// e: entity events for every node, plus l: import links in deep mode.
+// Keeping both steps behind one method keeps the Scan orchestrator flat.
+func (s *Scanner) persistGraph(ctx context.Context, nodes []*KnowledgeNode, result *ScanResult) error {
+	if err := s.persistEntityEvents(ctx, nodes); err != nil {
+		return fmt.Errorf("analysis: persist entity events: %w", err)
+	}
+	if s.deep {
+		if err := s.persistRelations(ctx, nodes, result); err != nil {
+			return fmt.Errorf("analysis: persist relations: %w", err)
+		}
+	}
+	return nil
+}
+
+// persistEntityEvents writes one e: entity event per knowledge node into
+// the typed-event log, which is the query surface read by graph/context/
+// recall. Writing these natively during the scan means a fresh
+// `pcke scan` populates the event-log graph without a manual `pcke
+// migrate`; the legacy kn:->e: migration remains only to upgrade
+// databases written by older versions.
+//
+// Emission is idempotent: a node whose v1 entity already exists is
+// skipped, so re-scans do not churn versions.
+func (s *Scanner) persistEntityEvents(ctx context.Context, nodes []*KnowledgeNode) error {
+	store := event.New(s.db)
+	for start := 0; start < len(nodes); start += entityEventBatchSize {
+		end := min(start+entityEventBatchSize, len(nodes))
+		batch := nodes[start:end]
+
+		if err := s.db.EnsureFreePages(len(batch) * pagesPerEntityEvent); err != nil {
+			return fmt.Errorf("grow for entity events: %w", err)
+		}
+
+		if err := s.db.Update(ctx, func(wtx *tx.WriteTx) error {
+			for _, node := range batch {
+				if err := appendEntityIfAbsent(wtx, store, node); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendEntityIfAbsent writes node as an e: entity event unless its v1
+// record already exists.
+func appendEntityIfAbsent(wtx *tx.WriteTx, store *event.Store, node *KnowledgeNode) error {
+	if node.ID == "" {
+		return nil
+	}
+	key, err := event.BuildKey(event.KindEntity, node.ID, 1)
+	if err != nil {
+		return fmt.Errorf("build key e:%s: %w", node.ID, err)
+	}
+	if _, getErr := wtx.Get(key); getErr == nil {
+		return nil
+	} else if !errors.Is(getErr, btree.ErrKeyNotFound) {
+		return fmt.Errorf("probe e:%s: %w", node.ID, getErr)
+	}
+
+	ent := &event.Entity{
+		Hdr:  event.Header{CreatedAt: node.CreatedAt, Lifecycle: event.LifecycleActive},
+		EID:  node.ID,
+		Type: node.Type,
+		Path: node.FilePath,
+		Name: node.Name,
+	}
+	if _, err := store.AppendInTx(wtx, ent); err != nil {
+		return fmt.Errorf("append e:%s: %w", node.ID, err)
+	}
+	return nil
+}
+
+// appendLinkIfAbsent writes rel as an l: link event (forward + reverse
+// index) unless its v1 record already exists.
+func appendLinkIfAbsent(wtx *tx.WriteTx, store *event.Store, rel *Relation) error {
+	link := &event.Link{
+		Hdr:      event.Header{CreatedAt: rel.CreatedAt, Lifecycle: event.LifecycleActive},
+		SrcRef:   "e:" + rel.SourceNodeID,
+		EdgeType: rel.Type,
+		DstRef:   "e:" + rel.TargetNodeID,
+	}
+	key, err := event.BuildKey(event.KindLink, link.ID(), 1)
+	if err != nil {
+		return fmt.Errorf("build key for link %s: %w", link.ID(), err)
+	}
+	if _, getErr := wtx.Get(key); getErr == nil {
+		return nil
+	} else if !errors.Is(getErr, btree.ErrKeyNotFound) {
+		return fmt.Errorf("probe link %s: %w", link.ID(), getErr)
+	}
+	if _, err := store.AppendInTx(wtx, link); err != nil {
+		return fmt.Errorf("append link %s -> %s: %w", link.SrcRef, link.DstRef, err)
+	}
+	return nil
+}
+
 // persistRelations creates import-graph relations from deep-scanned nodes.
 // Each import in a node produces a relation: source=node.ID → target=import.Path.
 //
 // Relations are written in bounded batches, pre-growing the freelist for
 // each batch, because kdb does not auto-grow inside a write transaction
-// and a deep scan can produce many thousands of edges.
+// and a deep scan can produce many thousands of edges. Each relation is
+// persisted both as a legacy rel: record and as an event-log l: link so
+// the graph query surface is populated natively by the scan.
 func (s *Scanner) persistRelations(ctx context.Context, nodes []*KnowledgeNode, result *ScanResult) error {
 	now := time.Now()
+	store := event.New(s.db)
 
 	rels := make([]Relation, 0, len(nodes))
 	for _, node := range nodes {
@@ -476,6 +591,9 @@ func (s *Scanner) persistRelations(ctx context.Context, nodes []*KnowledgeNode, 
 				}
 				if err := wtx.Put([]byte(prefixRel+rel.ID), data); err != nil {
 					return fmt.Errorf("put relation %s: %w", rel.ID, err)
+				}
+				if err := appendLinkIfAbsent(wtx, store, rel); err != nil {
+					return err
 				}
 			}
 			return nil

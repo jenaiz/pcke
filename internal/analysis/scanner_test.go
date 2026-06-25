@@ -210,7 +210,43 @@ func encode(v any) ([]byte, error) {
 		t.Errorf("kdb has %d relation keys, want 4", relCount)
 	}
 
+	// Gap B: the scan must populate the typed-event graph natively, so
+	// graph/context work without a manual `pcke migrate`. Expect one e:
+	// entity per scanned file (README.md, main.go, util.go) and one l:
+	// link per import (4).
+	if got := countKeysWithPrefix(t, db, "e:"); got != 3 {
+		t.Errorf("event log has %d e: entity keys, want 3", got)
+	}
+	if got := countKeysWithPrefix(t, db, "l:"); got != 4 {
+		t.Errorf("event log has %d l: link keys, want 4", got)
+	}
+
 	t.Logf("relations: created=%d persisted=%d", result.RelationsCreated, relCount)
+}
+
+// countKeysWithPrefix counts keys whose byte prefix exactly matches p.
+func countKeysWithPrefix(t *testing.T, db *kdb.DB, p string) int {
+	t.Helper()
+	var count int
+	err := db.View(context.Background(), func(rtx *tx.ReadTx) error {
+		c := rtx.Cursor()
+		if !c.First() {
+			return nil
+		}
+		for c.Valid() {
+			if strings.HasPrefix(string(c.Key()), p) {
+				count++
+			}
+			if !c.Next() {
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("count prefix %q: %v", p, err)
+	}
+	return count
 }
 
 func countRelations(t *testing.T, db *kdb.DB) int {
