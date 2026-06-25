@@ -102,6 +102,40 @@ func TestBackfillFromADRs_TranslatesAllFiles(t *testing.T) {
 	}
 }
 
+// TestBackfillFromADRs_CreatesDecisionLink verifies the scan anchors each
+// ADR decision back to its source file via a decision_link edge, so the
+// review workflow can surface the rule when that file is touched.
+func TestBackfillFromADRs_CreatesDecisionLink(t *testing.T) {
+	t.Parallel()
+	root, db := fixture(t, map[string]string{
+		"0001-foo.md": "# ADR-0001: Foo Decision\n\nBody A.",
+	})
+
+	if _, err := decisions.BackfillFromADRs(context.Background(), db, root); err != nil {
+		t.Fatalf("BackfillFromADRs: %v", err)
+	}
+
+	want := &event.Link{
+		SrcRef:   "e:docs/adr/0001-foo.md",
+		EdgeType: "decision_link",
+		DstRef:   "d:adr:0001-foo",
+	}
+	store := event.New(db)
+	got, err := store.Latest(context.Background(), event.KindLink, want.ID())
+	if err != nil {
+		t.Fatalf("Latest(decision_link): %v", err)
+	}
+	link, ok := got.(*event.Link)
+	if !ok {
+		t.Fatalf("got %T, want *event.Link", got)
+	}
+	if link.SrcRef != want.SrcRef || link.EdgeType != want.EdgeType || link.DstRef != want.DstRef {
+		t.Errorf("link = {%s -%s-> %s}, want {%s -%s-> %s}",
+			link.SrcRef, link.EdgeType, link.DstRef,
+			want.SrcRef, want.EdgeType, want.DstRef)
+	}
+}
+
 func TestBackfillFromADRs_TitleFromFirstHeading(t *testing.T) {
 	t.Parallel()
 	root, db := fixture(t, map[string]string{

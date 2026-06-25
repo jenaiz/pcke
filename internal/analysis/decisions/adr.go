@@ -63,6 +63,9 @@ func BackfillFromADRs(ctx context.Context, db UpdateDB, repoRoot string) (int, e
 
 	store := event.New(db)
 	written := 0
+	if err := ensureFreePages(db, len(files)*pagesPerDecision); err != nil {
+		return 0, fmt.Errorf("backfill ADRs: grow: %w", err)
+	}
 	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
 		for _, f := range files {
 			d, err := loadADRDecision(f)
@@ -75,6 +78,15 @@ func BackfillFromADRs(ctx context.Context, db UpdateDB, repoRoot string) (int, e
 			}
 			if ok {
 				written++
+			}
+			// Anchor the decision to its ADR file so the review
+			// workflow can surface it when that file is touched.
+			rel, relErr := filepath.Rel(repoRoot, f.path)
+			if relErr != nil {
+				rel = f.path
+			}
+			if _, err := writeDecisionLink(wtx, store, filepath.ToSlash(rel), d.DID); err != nil {
+				return err
 			}
 		}
 		return nil

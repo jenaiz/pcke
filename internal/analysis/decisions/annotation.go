@@ -43,6 +43,9 @@ func BackfillFromAnnotations(ctx context.Context, db UpdateDB, anns []annotation
 
 	store := event.New(db)
 	written := 0
+	if err := ensureFreePages(db, len(anns)*pagesPerDecision); err != nil {
+		return 0, fmt.Errorf("backfill annotations: grow: %w", err)
+	}
 	if err := db.Update(ctx, func(wtx *tx.WriteTx) error {
 		for _, a := range anns {
 			if a.Type != annotations.Rule {
@@ -58,6 +61,10 @@ func BackfillFromAnnotations(ctx context.Context, db UpdateDB, anns []annotation
 			}
 			if ok {
 				written++
+			}
+			// Anchor the rule to the source file it was declared in.
+			if _, err := writeDecisionLink(wtx, store, a.File, d.DID); err != nil {
+				return err
 			}
 		}
 		return nil

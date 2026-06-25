@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jenaiz/pcke/internal/kdb/btree"
 	"github.com/jenaiz/pcke/internal/kdb/event"
@@ -67,6 +68,65 @@ func writeDecision(wtx *tx.WriteTx, store *event.Store, d *event.Decision) (wrot
 		return false, fmt.Errorf("append d:%s: %w", d.DID, err)
 	}
 	return true, nil
+}
+
+// decisionLinkEdge is the edge type connecting a code entity to a
+// decision that governs or originates from it. It is the edge the
+// review workflow boosts, so retrieval surfaces the rules attached to
+// the files an agent is touching.
+const decisionLinkEdge = "decision_link"
+
+// pagesPerDecision is the freelist headroom reserved per decision when
+// pre-growing a backfill transaction. It covers the d: decision record
+// plus its decision_link edge (l: forward + lr: reverse) and B+tree
+// split / CoW churn.
+const pagesPerDecision = 8
+
+// writeDecisionLink appends a decision_link edge "e:<filePath>" ->
+// "d:<did>" inside wtx, unless its v1 record already exists. A blank
+// filePath or did is a no-op (the decision has no file anchor).
+//
+// filePath must be a repo-relative, slash-separated path (the entity id
+// form written by the scanner), so the SrcRef resolves to the file's
+// e: entity.
+func writeDecisionLink(wtx *tx.WriteTx, store *event.Store, filePath, did string) (bool, error) {
+	if filePath == "" || did == "" {
+		return false, nil
+	}
+	link := &event.Link{
+		Hdr: event.Header{
+			CreatedAt: time.Now().UTC(),
+			Lifecycle: event.LifecycleActive,
+		},
+		SrcRef:   "e:" + filePath,
+		EdgeType: decisionLinkEdge,
+		DstRef:   "d:" + did,
+	}
+	key, err := event.BuildKey(event.KindLink, link.ID(), 1)
+	if err != nil {
+		return false, fmt.Errorf("build key for decision_link %s: %w", link.ID(), err)
+	}
+	if _, getErr := wtx.Get(key); getErr == nil {
+		return false, nil
+	} else if !errors.Is(getErr, btree.ErrKeyNotFound) {
+		return false, fmt.Errorf("probe decision_link %s: %w", link.ID(), getErr)
+	}
+	if _, err := store.AppendInTx(wtx, link); err != nil {
+		return false, fmt.Errorf("append decision_link %s -> %s: %w", link.SrcRef, link.DstRef, err)
+	}
+	return true, nil
+}
+
+// ensureFreePages reserves at least n free pages when db supports
+// growth (satisfied by *kdb.DB). kdb does not auto-grow inside a write
+// transaction, so a backfill that out-sizes the current free pages must
+// reserve headroom first. Test doubles that do not implement the
+// capability are left untouched.
+func ensureFreePages(db any, n int) error {
+	if g, ok := db.(interface{ EnsureFreePages(int) error }); ok {
+		return g.EnsureFreePages(n)
+	}
+	return nil
 }
 
 // firstNonEmptyLine returns the first non-blank line of s, trimmed and
