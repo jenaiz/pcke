@@ -469,8 +469,10 @@ func (s *Scanner) persistGraph(ctx context.Context, nodes []*KnowledgeNode, resu
 // migrate`; the legacy kn:->e: migration remains only to upgrade
 // databases written by older versions.
 //
-// Emission is idempotent: a node whose v1 entity already exists is
-// skipped, so re-scans do not churn versions.
+// A new entity version is appended only when a file is new or its
+// content changed since the last recorded version (content-hash diff
+// against the latest stored entity), so the version chain tracks real
+// changes and a repeated --full scan does not churn versions.
 func (s *Scanner) persistEntityEvents(ctx context.Context, nodes []*KnowledgeNode) error {
 	store := event.New(s.db)
 	for start := 0; start < len(nodes); start += entityEventBatchSize {
@@ -483,7 +485,7 @@ func (s *Scanner) persistEntityEvents(ctx context.Context, nodes []*KnowledgeNod
 
 		if err := s.db.Update(ctx, func(wtx *tx.WriteTx) error {
 			for _, node := range batch {
-				if err := appendEntityIfAbsent(wtx, store, node); err != nil {
+				if err := appendEntityVersion(wtx, store, node); err != nil {
 					return err
 				}
 			}
@@ -495,28 +497,33 @@ func (s *Scanner) persistEntityEvents(ctx context.Context, nodes []*KnowledgeNod
 	return nil
 }
 
-// appendEntityIfAbsent writes node as an e: entity event unless its v1
-// record already exists.
-func appendEntityIfAbsent(wtx *tx.WriteTx, store *event.Store, node *KnowledgeNode) error {
+// appendEntityVersion appends a new e: entity version for node when the
+// file is new or its content changed since the latest stored version.
+// Idempotency is self-contained: the content hash is stored on the
+// entity, so an unchanged file (e.g. re-emitted by a --full scan) is
+// skipped regardless of whether the scan loaded prior kn: state. The
+// event store auto-increments the version and links the supersedes
+// pointer to the prior version; CreatedAt is stamped with the node's
+// observation time so each version carries a distinct timeline stamp.
+func appendEntityVersion(wtx *tx.WriteTx, store *event.Store, node *KnowledgeNode) error {
 	if node.ID == "" {
 		return nil
 	}
-	key, err := event.BuildKey(event.KindEntity, node.ID, 1)
-	if err != nil {
-		return fmt.Errorf("build key e:%s: %w", node.ID, err)
-	}
-	if _, getErr := wtx.Get(key); getErr == nil {
-		return nil
-	} else if !errors.Is(getErr, btree.ErrKeyNotFound) {
-		return fmt.Errorf("probe e:%s: %w", node.ID, getErr)
+	if latest, err := store.LatestInTx(wtx, event.KindEntity, node.ID); err == nil {
+		if ent, ok := latest.(*event.Entity); ok && ent.Hash == node.ContentHash {
+			return nil // unchanged since the latest stored version
+		}
+	} else if !errors.Is(err, event.ErrNotFound) {
+		return fmt.Errorf("probe latest e:%s: %w", node.ID, err)
 	}
 
 	ent := &event.Entity{
-		Hdr:  event.Header{CreatedAt: node.CreatedAt, Lifecycle: event.LifecycleActive},
+		Hdr:  event.Header{CreatedAt: node.UpdatedAt, Lifecycle: event.LifecycleActive},
 		EID:  node.ID,
 		Type: node.Type,
 		Path: node.FilePath,
 		Name: node.Name,
+		Hash: node.ContentHash,
 	}
 	if _, err := store.AppendInTx(wtx, ent); err != nil {
 		return fmt.Errorf("append e:%s: %w", node.ID, err)

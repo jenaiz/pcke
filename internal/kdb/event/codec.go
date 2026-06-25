@@ -234,6 +234,8 @@ func assembleEntity(id string, hdr Header, fields []rawPayload) *Entity {
 			ent.Path = f.s
 		case fieldEntityName:
 			ent.Name = f.s
+		case fieldEntityHash:
+			ent.Hash = f.s
 			// Unknown fields skipped via captureRaw for forward-compat.
 		}
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jenaiz/pcke/internal/config"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/event"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
 )
 
@@ -222,6 +223,92 @@ func encode(v any) ([]byte, error) {
 	}
 
 	t.Logf("relations: created=%d persisted=%d", result.RelationsCreated, relCount)
+}
+
+// TestEntityVersioning verifies that re-scanning a repository appends a
+// new e: entity version only for files whose content changed, building a
+// supersedes chain, while unchanged files stay at a single version.
+func TestEntityVersioning(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	writeFile(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeFile(t, dir, "util.go", "package main\n\nfunc helper() int { return 1 }\n")
+	run(t, dir, "git", "add", ".")
+	run(t, dir, "git", "commit", "-m", "initial")
+
+	dbDir := t.TempDir()
+	db, err := kdb.Open(dbDir, nil)
+	if err != nil {
+		t.Fatalf("kdb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	cfg := config.Defaults().Scan
+
+	// Each scan uses a fresh Scanner, mirroring production where every
+	// `pcke scan` invocation builds a new Scanner (the AST parser is
+	// single-use and closed at the end of Scan).
+	scan := func(full bool) {
+		t.Helper()
+		scanner, err := NewScanner(dir, db, cfg, WithDeep())
+		if err != nil {
+			t.Fatalf("NewScanner: %v", err)
+		}
+		if _, err := scanner.Scan(context.Background(), full); err != nil {
+			t.Fatalf("Scan(full=%v): %v", full, err)
+		}
+	}
+
+	// First scan: every file gets v1.
+	scan(true)
+	if got := entityVersionCount(t, db, "main.go"); got != 1 {
+		t.Fatalf("after first scan main.go has %d versions, want 1", got)
+	}
+
+	// Re-scan with no changes: no new versions (idempotent on content).
+	scan(true)
+	if got := entityVersionCount(t, db, "main.go"); got != 1 {
+		t.Fatalf("after no-op scan main.go has %d versions, want 1", got)
+	}
+
+	// Change main.go only, then re-scan: main.go gains v2, util.go stays v1.
+	writeFile(t, dir, "main.go", "package main\n\nfunc main() { println(\"changed\") }\n")
+	run(t, dir, "git", "add", ".")
+	run(t, dir, "git", "commit", "-m", "edit main")
+
+	scan(false)
+	if got := entityVersionCount(t, db, "main.go"); got != 2 {
+		t.Errorf("after edit main.go has %d versions, want 2", got)
+	}
+	if got := entityVersionCount(t, db, "util.go"); got != 1 {
+		t.Errorf("unchanged util.go has %d versions, want 1", got)
+	}
+
+	// The newest main.go version must point back via supersedes.
+	store := event.New(db)
+	latest, err := store.Latest(context.Background(), event.KindEntity, "main.go")
+	if err != nil {
+		t.Fatalf("Latest main.go: %v", err)
+	}
+	if len(latest.Header().Supersedes) == 0 {
+		t.Errorf("latest main.go version missing supersedes pointer")
+	}
+}
+
+// entityVersionCount returns the number of e: entity versions stored for id.
+func entityVersionCount(t *testing.T, db *kdb.DB, id string) int {
+	t.Helper()
+	store := event.New(db)
+	var n int
+	err := store.History(context.Background(), event.KindEntity, id, func(event.Event) error {
+		n++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("History %q: %v", id, err)
+	}
+	return n
 }
 
 // countKeysWithPrefix counts keys whose byte prefix exactly matches p.

@@ -127,6 +127,7 @@ const (
 	fieldEntityType uint8 = 10
 	fieldEntityPath uint8 = 11
 	fieldEntityName uint8 = 12
+	fieldEntityHash uint8 = 13
 
 	// Decision-specific.
 	fieldDecisionTitle    uint8 = 15
@@ -156,6 +157,7 @@ type Entity struct {
 	Type string // "file" | "function" | "type" | "module"
 	Path string // file path (entities anchored to a file)
 	Name string // symbol name (functions, types)
+	Hash string // content hash; distinguishes versions across edits
 }
 
 // Kind reports the event kind. See Kind.
@@ -179,6 +181,9 @@ func (e *Entity) encodePayload(enc *encoding.Encoder) {
 	}
 	if e.Name != "" {
 		enc.PutString(fieldEntityName, e.Name)
+	}
+	if e.Hash != "" {
+		enc.PutString(fieldEntityHash, e.Hash)
 	}
 }
 

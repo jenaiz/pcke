@@ -194,6 +194,32 @@ func (s *Store) Latest(ctx context.Context, kind Kind, id string) (Event, error)
 	return result, nil
 }
 
+// LatestInTx returns the highest-version event for (kind, id) within the
+// given write transaction, or ErrNotFound if no version exists. It lets
+// callers make append decisions (e.g. skip when content is unchanged)
+// inside the same transaction that performs the append.
+func (s *Store) LatestInTx(wtx *tx.WriteTx, kind Kind, id string) (Event, error) {
+	if id == "" {
+		return nil, ErrEmptyID
+	}
+	key, _, err := latestKeyAndVersion(wtx.Cursor(), kind, id)
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, ErrNotFound
+	}
+	val, err := wtx.Get(key)
+	if err != nil {
+		return nil, fmt.Errorf("get latest %q: %w", key, err)
+	}
+	evt, err := Decode(val, id)
+	if err != nil {
+		return nil, fmt.Errorf("decode latest %q: %w", key, err)
+	}
+	return evt, nil
+}
+
 // AppendLink is a typed convenience wrapper around Append for Link events.
 // The semantics are identical to Append; the wrapper exists so callers
 // holding a *Link (rather than an Event) avoid an interface assertion.
