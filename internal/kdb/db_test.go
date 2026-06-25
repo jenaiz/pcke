@@ -117,6 +117,41 @@ func TestGrowChunk(t *testing.T) {
 	}
 }
 
+func TestEnsureFreePages(t *testing.T) {
+	dir := testDir(t)
+
+	db, err := kdb.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Reserving more pages than are currently free must grow the file.
+	const want = 64
+	if err := db.EnsureFreePages(want); err != nil {
+		t.Fatalf("EnsureFreePages: %v", err)
+	}
+	if got := db.FreePages(); got < want {
+		t.Fatalf("after EnsureFreePages(%d): FreePages = %d, want >= %d", want, got, want)
+	}
+
+	// A second call for a count already satisfied must not grow further.
+	before, err := db.FileSize()
+	if err != nil {
+		t.Fatalf("FileSize: %v", err)
+	}
+	if err := db.EnsureFreePages(want); err != nil {
+		t.Fatalf("EnsureFreePages (idempotent): %v", err)
+	}
+	after, err := db.FileSize()
+	if err != nil {
+		t.Fatalf("FileSize: %v", err)
+	}
+	if after != before {
+		t.Errorf("EnsureFreePages grew when already satisfied: before = %d, after = %d", before, after)
+	}
+}
+
 func TestGrowVerifyWithStat(t *testing.T) {
 	dir := testDir(t)
 

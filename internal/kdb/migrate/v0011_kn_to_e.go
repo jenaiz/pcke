@@ -21,6 +21,13 @@ const legacyKnPrefix = "kn:"
 // one fat transaction can exhaust the freelist on large repos.
 const knBatchSize = 100
 
+// pagesPerMigratedRecord is the freelist headroom reserved per record in
+// a bulk translation batch. A Link writes both a forward (l:) and a
+// reverse-index (lr:) record and may split B+tree nodes under CoW, so
+// the reservation is generous to keep a batch from running the freelist
+// dry mid-transaction.
+const pagesPerMigratedRecord = 8
+
 // legacyKnowledgeNode mirrors the JSON shape of a v0.9.x kn: record.
 // We keep this declared inside the migrate package (rather than
 // depending on internal/analysis) so the migration is self-contained
@@ -78,6 +85,9 @@ func migrateKnToE(ctx context.Context, db UpdateDB) error {
 			end = len(records)
 		}
 		batch := records[start:end]
+		if err := ensureFreePages(db, len(batch)*pagesPerMigratedRecord); err != nil {
+			return fmt.Errorf("migrate 0011: grow: %w", err)
+		}
 		if err := translateKnBatch(ctx, db, store, batch); err != nil {
 			return fmt.Errorf("migrate 0011: batch %d-%d: %w", start, end, err)
 		}

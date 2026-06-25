@@ -80,7 +80,10 @@ func warnBranchMismatch(db *kdb.DB, cwd string) {
 }
 
 func newScanCmd() *cobra.Command {
-	var full bool
+	var (
+		full bool
+		deep bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "scan",
@@ -88,11 +91,15 @@ func newScanCmd() *cobra.Command {
 		Long: `Scan the repository for source files and update the knowledge base.
 
 Incrementally detects new, modified, and deleted files. Use --full to
-force a complete rebuild of all knowledge nodes.
+force a complete rebuild of all knowledge nodes. Use --deep to extract
+AST-level entities (functions, types) and import relations into the
+typed-event graph (requires a C compiler for tree-sitter).
 
 Examples:
   pcke scan              Incremental scan (fast)
-  pcke scan --full       Full rebuild of knowledge base`,
+  pcke scan --full       Full rebuild of knowledge base
+  pcke scan --deep       Incremental scan with AST entity + import extraction
+  pcke scan --full --deep  Full rebuild with deep analysis`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -106,7 +113,11 @@ Examples:
 			defer func() { _ = db.Close() }()
 
 			cfg := config.Defaults().Scan
-			scanner, err := analysis.NewScanner(cwd, db, cfg)
+			var opts []analysis.ScanOption
+			if deep {
+				opts = append(opts, analysis.WithDeep())
+			}
+			scanner, err := analysis.NewScanner(cwd, db, cfg, opts...)
 			if err != nil {
 				return fmt.Errorf("scan: init scanner: %w", err)
 			}
@@ -119,11 +130,16 @@ Examples:
 			fmt.Printf("scan complete: %d created, %d updated, %d deleted (%d files in %s)\n",
 				result.NodesCreated, result.NodesUpdated, result.NodesDeleted,
 				result.FilesScanned, result.Duration.Round(1e6))
+			if deep {
+				fmt.Printf("deep analysis: %d entities, %d relations extracted\n",
+					result.EntitiesExtracted, result.RelationsCreated)
+			}
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVar(&full, "full", false, "Force a full scan (rebuild all nodes)")
+	cmd.Flags().BoolVar(&deep, "deep", false, "Extract AST entities and import relations (tree-sitter)")
 
 	return cmd
 }

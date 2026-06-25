@@ -37,6 +37,24 @@ type DB interface {
 	SetSchemaVersion(v uint16)
 }
 
+// grower is the optional capability, satisfied by *kdb.DB, that lets a
+// bulk migration pre-grow the freelist before a write transaction.
+// kdb does not auto-grow inside a tx, so a batch that out-sizes the
+// current free pages must reserve headroom first.
+type grower interface {
+	EnsureFreePages(n int) error
+}
+
+// ensureFreePages reserves at least n free pages when db supports growth.
+// Test doubles that do not implement grower are left untouched; their
+// callers are expected to pre-size the database themselves.
+func ensureFreePages(db any, n int) error {
+	if g, ok := db.(grower); ok {
+		return g.EnsureFreePages(n)
+	}
+	return nil
+}
+
 // MigrationFunc is a function that migrates the database from version (v-1) to v.
 // The context can be used for cancellation of long-running migrations.
 //

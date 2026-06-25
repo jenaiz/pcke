@@ -76,6 +76,9 @@ func migrateRelToL(ctx context.Context, db UpdateDB) error {
 			end = len(records)
 		}
 		batch := records[start:end]
+		if err := ensureFreePages(db, len(batch)*pagesPerMigratedRecord); err != nil {
+			return fmt.Errorf("migrate 0012: grow: %w", err)
+		}
 		if err := translateRelBatch(ctx, db, store, batch); err != nil {
 			return fmt.Errorf("migrate 0012: batch %d-%d: %w", start, end, err)
 		}

@@ -73,6 +73,19 @@ const (
 	metaScanBranch = "meta:scan_branch"
 )
 
+const (
+	// relationBatchSize bounds how many relation records are written per
+	// transaction so per-tx copy-on-write churn stays bounded on large repos.
+	relationBatchSize = 1000
+	// pagesPerRelation is the freelist headroom reserved per relation
+	// record (covers the record plus B+tree split / CoW churn).
+	pagesPerRelation = 4
+	// pagesPerDeepNode is the freelist headroom reserved per knowledge
+	// node when deep analysis embeds AST entities and imports, which makes
+	// each node payload substantially larger than a shallow scan.
+	pagesPerDeepNode = 8
+)
+
 // ScanResult summarises a completed scan.
 type ScanResult struct {
 	NodesCreated      int
@@ -366,6 +379,15 @@ func (s *Scanner) markDeleted(existing map[string]KnowledgeNode, seen map[string
 // persistAll writes all nodes and the last scan commit atomically.
 // It also updates all four secondary indexes (by_module, by_tag, by_file, by_type).
 func (s *Scanner) persistAll(ctx context.Context, nodes []*KnowledgeNode, headHash string, existing map[string]KnowledgeNode) error {
+	// Deep-scanned nodes embed AST entities and imports, making each
+	// payload much larger than a shallow node; reserve extra freelist
+	// headroom so the single write transaction does not run dry.
+	if s.deep {
+		if err := s.db.EnsureFreePages(len(nodes) * pagesPerDeepNode); err != nil {
+			return fmt.Errorf("analysis: grow for deep nodes: %w", err)
+		}
+	}
+
 	branch := s.git.CurrentBranch()
 	return s.db.Update(ctx, func(wtx *tx.WriteTx) error {
 		for _, node := range nodes {
@@ -416,19 +438,38 @@ func (s *Scanner) persistAll(ctx context.Context, nodes []*KnowledgeNode, headHa
 
 // persistRelations creates import-graph relations from deep-scanned nodes.
 // Each import in a node produces a relation: source=node.ID → target=import.Path.
+//
+// Relations are written in bounded batches, pre-growing the freelist for
+// each batch, because kdb does not auto-grow inside a write transaction
+// and a deep scan can produce many thousands of edges.
 func (s *Scanner) persistRelations(ctx context.Context, nodes []*KnowledgeNode, result *ScanResult) error {
 	now := time.Now()
-	return s.db.Update(ctx, func(wtx *tx.WriteTx) error {
-		for _, node := range nodes {
-			for _, imp := range node.Imports {
-				rel := Relation{
-					ID:           node.ID + "→" + imp.Path,
-					SourceNodeID: node.ID,
-					TargetNodeID: imp.Path,
-					Type:         "imports",
-					Source:       "auto",
-					CreatedAt:    now,
-				}
+
+	rels := make([]Relation, 0, len(nodes))
+	for _, node := range nodes {
+		for _, imp := range node.Imports {
+			rels = append(rels, Relation{
+				ID:           node.ID + "→" + imp.Path,
+				SourceNodeID: node.ID,
+				TargetNodeID: imp.Path,
+				Type:         "imports",
+				Source:       "auto",
+				CreatedAt:    now,
+			})
+		}
+	}
+
+	for start := 0; start < len(rels); start += relationBatchSize {
+		end := min(start+relationBatchSize, len(rels))
+		batch := rels[start:end]
+
+		if err := s.db.EnsureFreePages(len(batch) * pagesPerRelation); err != nil {
+			return fmt.Errorf("grow for relations: %w", err)
+		}
+
+		if err := s.db.Update(ctx, func(wtx *tx.WriteTx) error {
+			for i := range batch {
+				rel := &batch[i]
 				data, err := json.Marshal(rel)
 				if err != nil {
 					return fmt.Errorf("marshal relation %s: %w", rel.ID, err)
@@ -436,11 +477,14 @@ func (s *Scanner) persistRelations(ctx context.Context, nodes []*KnowledgeNode, 
 				if err := wtx.Put([]byte(prefixRel+rel.ID), data); err != nil {
 					return fmt.Errorf("put relation %s: %w", rel.ID, err)
 				}
-				result.RelationsCreated++
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		return nil
-	})
+		result.RelationsCreated += len(batch)
+	}
+	return nil
 }
 
 // collectFiles walks the repository tree and returns relative paths of

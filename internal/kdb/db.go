@@ -257,6 +257,31 @@ func (db *DB) Grow() error {
 	return nil
 }
 
+// FreePages reports the number of pages currently available in the
+// freelist for allocation.
+func (db *DB) FreePages() int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return db.fl.FreeCount()
+}
+
+// EnsureFreePages grows the data file until at least n pages are
+// available in the freelist, reusing already-free pages so the file
+// does not balloon across repeated calls.
+//
+// kdb does not auto-grow inside a write transaction, so bulk writers
+// must pre-grow enough headroom for a batch BEFORE opening the tx.
+// EnsureFreePages grows only the deficit (n minus the current free
+// count), one growth chunk at a time.
+func (db *DB) EnsureFreePages(n int) error {
+	for db.FreePages() < n {
+		if err := db.Grow(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // grow extends the file by one chunk. Caller must hold db.mu.
 func (db *DB) grow() error {
 	info, err := db.file.Stat()
