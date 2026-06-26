@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +59,8 @@ func TestRootVersion(t *testing.T) {
 }
 
 func TestSubcommandStubs(t *testing.T) {
-	t.Parallel()
+	// Not parallel: dbSubs subtests chdir via t.Chdir, which requires a
+	// non-parallel test and serialises cwd mutation across the package.
 
 	// Commands that print help only (parent commands with subcommands).
 	helpSubs := []string{"rule", "note"}
@@ -94,11 +94,7 @@ func TestSubcommandStubs(t *testing.T) {
 				_ = db.Close()
 			}
 
-			origDir, _ := os.Getwd()
-			if err := os.Chdir(tmp); err != nil {
-				t.Fatalf("chdir: %v", err)
-			}
-			t.Cleanup(func() { _ = os.Chdir(origDir) })
+			t.Chdir(tmp)
 
 			cmd := newRootCmd()
 			buf := new(bytes.Buffer)
@@ -114,14 +110,9 @@ func TestSubcommandStubs(t *testing.T) {
 }
 
 func TestConfigSubcommands(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: t.Chdir requires a non-parallel test.
 	tmp := t.TempDir()
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Chdir(tmp)
 
 	tests := []struct {
 		args []string
@@ -202,14 +193,9 @@ func TestServeCmd_Help(t *testing.T) {
 }
 
 func TestServeCmd_NoKDB(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: t.Chdir requires a non-parallel test.
 	tmp := t.TempDir()
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Chdir(tmp)
 
 	cmd := newRootCmd()
 	buf := new(bytes.Buffer)
@@ -275,11 +261,7 @@ func TestRecallImproved_TextOutput(t *testing.T) {
 	db := seedTestDB(t, tmp)
 	_ = db.Close()
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Chdir(tmp)
 
 	// Call runRecall directly; if it returns nil, the command succeeded.
 	err := runRecall("kdb database", 10, "text", false)
@@ -293,11 +275,7 @@ func TestRecallImproved_JSONOutput(t *testing.T) {
 	db := seedTestDB(t, tmp)
 	_ = db.Close()
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Chdir(tmp)
 
 	// Call runRecall with json format; verify no error.
 	err := runRecall("kdb database", 10, "json", false)
@@ -315,11 +293,7 @@ func TestRecallImproved_NoResults(t *testing.T) {
 	}
 	_ = db.Close()
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Chdir(tmp)
 
 	// Should succeed with "no results" (no error).
 	err = runRecall("nonexistent_xyzzy_query", 10, "text", false)
@@ -333,11 +307,7 @@ func TestRecallImproved_Verbose(t *testing.T) {
 	db := seedTestDB(t, tmp)
 	_ = db.Close()
 
-	origDir, _ := os.Getwd()
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Chdir(tmp)
 
 	// Verbose mode should not error.
 	err := runRecall("kdb", 10, "text", true)
