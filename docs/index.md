@@ -6,6 +6,7 @@ local knowledge base for AI assistants.
 ## Quick links
 
 - [Getting Started](getting-started.md) — install, scan, query
+- [Testing Generated Code](testing-generated-code.md) — validation checklist for entities, decisions, context retrieval
 - [Graph Guide](graph-guide.md) — worked examples for `pcke graph` / `decision` / `history` (v0.10+)
 - [Architecture](architecture.md) — system design, storage engine, concurrency
 - [API Reference](api-reference.md) — Go API surface
