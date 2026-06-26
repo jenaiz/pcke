@@ -13,7 +13,9 @@ import (
 
 	"github.com/jenaiz/pcke/internal/analysis"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/event"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
+	"github.com/jenaiz/pcke/internal/observe"
 	"github.com/jenaiz/pcke/internal/output"
 	"github.com/jenaiz/pcke/internal/retrieval"
 	"github.com/jenaiz/pcke/internal/retrieval/session"
@@ -28,7 +30,8 @@ type Server struct {
 	resources []mcpserver.ServerResource
 	prompts   []mcpserver.ServerPrompt
 	broker    *Broker
-	sessions  *session.MemoryStore
+	sessions  session.Store
+	collector *observe.Collector
 
 	// workflowMu guards workflows, the per-session workflow set via the
 	// set_workflow tool (F15.T6). Context tools inherit it when their
@@ -40,11 +43,17 @@ type Server struct {
 // New creates a [Server] backed by the given kdb database.
 // All tools and resources are read-only.
 func New(db *kdb.DB, root string) *Server {
+	// Phase 14: persist session + tool-call observations to kdb so the
+	// session subgraph (o:session:*, o:call:*) survives `pcke serve`
+	// restart and feeds `pcke sessions` / `pcke stats`. The collector
+	// batches writes on a background goroutine; Serve drains it on exit.
+	collector := observe.New(db, event.New(db), observe.Options{})
 	s := &Server{
 		db:        db,
 		root:      root,
 		broker:    NewBroker(),
-		sessions:  session.NewMemoryStore(),
+		collector: collector,
+		sessions:  session.NewPersistentStore(db, collector),
 		workflows: make(map[string]retrieval.Workflow),
 	}
 
@@ -65,9 +74,24 @@ func New(db *kdb.DB, root string) *Server {
 }
 
 // Serve starts the MCP server on stdio. Blocks until the client
-// disconnects or a signal is received.
+// disconnects or a signal is received. On return it drains the
+// observation collector so any pending session/tool-call records are
+// flushed to kdb before the process exits.
 func (s *Server) Serve() error {
+	defer func() { _ = s.Close() }()
 	return mcpserver.ServeStdio(s.srv)
+}
+
+// Close drains the observation collector and releases session state.
+// Safe to call more than once. Used by Serve on shutdown.
+func (s *Server) Close() error {
+	if s.collector != nil {
+		_ = s.collector.Close()
+	}
+	if s.sessions != nil {
+		_ = s.sessions.Close()
+	}
+	return nil
 }
 
 // MCPServer returns the underlying MCPServer for testing purposes.
