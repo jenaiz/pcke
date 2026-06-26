@@ -86,7 +86,7 @@ func TestBackfillAll_AggregatesAllSources(t *testing.T) {
 		{Hash: "bbbbbbbbbbbb1234567890ab", Author: "y", Time: time.Now().UTC(), Message: "feat: not a decision"},
 	}
 
-	got, err := decisions.BackfillAll(context.Background(), db, root, commits)
+	got, err := decisions.BackfillAll(context.Background(), db, root, commits, nil)
 	if err != nil {
 		t.Fatalf("BackfillAll: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestBackfillAll_NilCommitSourceSkipsCommitBackfill(t *testing.T) {
 	t.Parallel()
 	root, db := setupOrchestratorRepo(t)
 
-	got, err := decisions.BackfillAll(context.Background(), db, root, nil)
+	got, err := decisions.BackfillAll(context.Background(), db, root, nil, nil)
 	if err != nil {
 		t.Fatalf("BackfillAll: %v", err)
 	}
@@ -140,10 +140,10 @@ func TestBackfillAll_Idempotent(t *testing.T) {
 	commits := stubCommits{
 		{Hash: "aaaaaaaaaaaa1234567890ab", Author: "x", Time: time.Now().UTC(), Message: "decision: x"},
 	}
-	if _, err := decisions.BackfillAll(context.Background(), db, root, commits); err != nil {
+	if _, err := decisions.BackfillAll(context.Background(), db, root, commits, nil); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	got, err := decisions.BackfillAll(context.Background(), db, root, commits)
+	got, err := decisions.BackfillAll(context.Background(), db, root, commits, nil)
 	if err != nil {
 		t.Fatalf("re-run: %v", err)
 	}

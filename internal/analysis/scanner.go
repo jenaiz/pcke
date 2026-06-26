@@ -263,12 +263,12 @@ func (s *Scanner) Scan(ctx context.Context, full bool) (*ScanResult, error) {
 		}
 	}
 
-	// Decision backfill: harvest ADRs, @pcke-rule annotations, and
-	// commit-message decision markers into the typed-event log so
-	// graph queries return populated d: records on day one.
+	// Decision backfill: harvest ADRs, @pcke-rule annotations, doc
+	// headings, and commit-message decision markers into the typed-event
+	// log so graph queries return populated d: records on day one.
 	// Backfill failures are non-fatal: the scan succeeded, the
 	// backfill is best-effort enrichment.
-	if r, err := decisions.BackfillAll(ctx, s.db, s.root, s.git); err != nil {
+	if r, err := decisions.BackfillAll(ctx, s.db, s.root, s.git, files); err != nil {
 		// Surface partial counts even on error so the result is honest.
 		result.Decisions = r
 	} else {

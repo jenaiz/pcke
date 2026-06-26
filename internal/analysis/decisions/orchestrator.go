@@ -14,7 +14,7 @@ type CommitSource interface {
 
 // BackfillAll runs every decision-backfill source against the database
 // and returns the per-source totals. Source ordering is stable so test
-// output is deterministic: ADR -> annotation -> commit.
+// output is deterministic: ADR -> annotation -> doc -> commit.
 //
 // Each source is independent: if one fails, the orchestrator returns
 // the error along with the partial Result accumulated so far. Callers
@@ -22,8 +22,9 @@ type CommitSource interface {
 //
 // repoRoot is the path the scanner is operating on; commits is
 // optional (pass nil to skip the commit-message scan, useful for tests
-// or repos without git history).
-func BackfillAll(ctx context.Context, db UpdateDB, repoRoot string, commits CommitSource) (Result, error) {
+// or repos without git history). files is the full set of scanned file
+// ids used by the doc backfill's module-link pass; pass nil to skip it.
+func BackfillAll(ctx context.Context, db UpdateDB, repoRoot string, commits CommitSource, files []string) (Result, error) {
 	var r Result
 
 	n, err := BackfillFromADRs(ctx, db, repoRoot)
@@ -40,6 +41,12 @@ func BackfillAll(ctx context.Context, db UpdateDB, repoRoot string, commits Comm
 	r.Annotations = n
 	if err != nil {
 		return r, fmt.Errorf("backfill annotations: %w", err)
+	}
+
+	n, err = BackfillFromDocs(ctx, db, repoRoot, files)
+	r.Docs = n
+	if err != nil {
+		return r, fmt.Errorf("backfill docs: %w", err)
 	}
 
 	if commits != nil {
