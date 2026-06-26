@@ -1,9 +1,11 @@
 # pcke — Project Context & Knowledge Engine
 
-> **Status: v0.10.0 — graph foundation shipped.** The pivot is ratified by
+> **Status: v0.13.0 — durable code memory shipped.** All post-pivot phases
+> (11–15) are complete. The pivot is ratified by
 > [ADR-0008](docs/adr/0008-context-graph-pivot.md) (amended by
-> [ADR-0009](docs/adr/0009-durable-memory-corrections.md)). The first stable
-> release is `v1.0.0` after Phase 15.
+> [ADR-0009](docs/adr/0009-durable-memory-corrections.md)). The next milestone
+> is the `v1.0.0` stable release, gated on the acceptance demo in
+> [PRD v5.2 §8](PRDs/PRD_PCKE_v5_2_DURABLE_MEMORY.md).
 
 **pcke gives every repo a durable, queryable memory.** Decisions, code
 structure, change history, and agent interactions are stored as typed,
@@ -28,8 +30,7 @@ Tags `v1.0.0` through `v2.0.0` predate the v1.0 stability commitment. They
 are superseded by parallel `v0.4.0`–`v0.9.0` tags pointing at the same commits
 and are marked withdrawn via `retract` in `go.mod`. Old tags remain in git
 history; binary releases under the old names are retained but flagged as
-superseded. New consumers should pin to `v0.9.0` (or `@latest` once Phase 12
-ships).
+superseded. New consumers should pin to `v0.9.0` or use `@latest` (now `v0.13.0`).
 
 `v2.0.0` cannot be retracted in `go.mod` because the module path lacks a
 `/v2` suffix; it was already unreachable via `go install`. Binary/Homebrew
@@ -180,14 +181,20 @@ cd /path/to/your-project
 }
 ```
 
-### Available MCP tools (today, v0.9.x)
+### Available MCP tools
 
 | Tool | Description |
 |------|-------------|
-| `recall` | Semantic search across knowledge nodes (substring matching with weighted scoring) |
-| `get_module_context` | Get all entities, dependencies, and metadata for a specific module |
-| `get_constraints` | Infer Go and infrastructure constraints from the knowledge base |
-| `get_history` | Get evolution history for a specific file path |
+| `recall` | Search the knowledge base for files, modules, and code entities |
+| `get_context_for_file` | Ranked, budget-bounded context subgraph for a single file: 2-hop neighborhood, applicable decisions, linked references |
+| `get_context_for_diff` | Ranked context for the union of subgraphs around changed files (auto-detects git worktree status when none given) |
+| `set_workflow` | Set the active workflow (bugfix / feature / review / refactor / …) for a session; tunes ranker weights and edge priorities |
+| `get_module_context` | Summary of a module: files, dependencies, stability, entities |
+| `get_constraints` | Engineering constraints and rules inferred from the knowledge base |
+| `get_history` | Change history (version chain / evolution logs) for a file or key |
+
+Federation tools (`query_federation`, `get_cross_repo_deps`) remain registered
+but are **deprecated** (see [ADR-0008](docs/adr/0008-context-graph-pivot.md)).
 
 ### Available MCP resources
 
@@ -196,15 +203,6 @@ cd /path/to/your-project
 | `pcke://architecture` | Rendered architecture overview of the project |
 | `pcke://constraints` | Rendered constraints and conventions |
 | `pcke://decisions` | Rendered design decisions and ADRs |
-
-### Coming in v0.10–v0.13
-
-| Phase | Adds |
-|-------|------|
-| 12 — Memory Schema + Graph | Typed-event log (Entity / Decision / Observation / Outcome), graph traversal primitives, `TRAVERSE` and `AS OF` DSL, decision backfill from ADRs and `@pcke-rule` annotations |
-| 13 — Subgraph Retrieval | `get_context_for_file`, `get_context_for_diff`, topology-aware sync, optional `-tags=rerank` vector re-ranker over subgraphs |
-| 14 — Durable Sessions | Persistent agent sessions, `pcke sessions`, `pcke stats` (raw counts) |
-| 15 — Workflow Awareness | `set_workflow` MCP tool, recipes, anticipatory context |
 
 ## Documentation
 
@@ -237,7 +235,7 @@ Phases 9 (Local Embeddings as bundled feature) and 10 (IDE Extensions) remain
 post-1.0; embeddings will land as an opt-in `-tags=rerank` re-ranker per
 [ADR-0009 §2](docs/adr/0009-durable-memory-corrections.md).
 
-## What's implemented today (v0.9.x)
+## What's implemented today (v0.13.0)
 
 ### Storage engine (`internal/kdb`)
 

@@ -205,8 +205,8 @@ and [Architecture](architecture.md) for the typed-event log design.
 | `d:` | Decision | scan-time backfill (ADRs, `@pcke-rule`, commit messages) |
 | `l:` | Link (forward edge) | `pcke scan` (also migrated from legacy `rel:`) |
 | `lr:` | Reverse-link index | maintained automatically alongside `l:` |
-| `o:` | Observation | reserved (Phase 14) |
-| `x:` | Outcome | reserved (Phase 14) |
+| `o:` | Observation (agent session / tool call) | `pcke serve` via the observation collector |
+| `x:` | Outcome (derived event) | typed-event schema; surfaced by `pcke stats` |
 
 The legacy collections (`kn:`/`rel:`/`nt:`/`el:`) are still readable
 through `pcke query nodes …` for backward compatibility, but new work

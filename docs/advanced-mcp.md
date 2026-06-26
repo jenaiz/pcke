@@ -254,10 +254,10 @@ which paths the engine actually traversed.
 
 Pass the same `session_id` across multiple `get_context_for_file` /
 `get_context_for_diff` calls and the engine treats every ref it has
-already served on that session as `novelty = 0`. The accumulated set
-lives in memory (`internal/retrieval/session`) — restart `pcke serve`
-to clear it. Phase 14 will swap the storage backend for a kdb-backed
-store without changing call sites.
+already served on that session as `novelty = 0`. As of Phase 14 the
+session is kdb-backed (`internal/retrieval/session` → `PersistentSession`
+writing through the observation collector), so the accumulated set
+survives a `pcke serve` restart; inspect it with `pcke sessions show`.
 
 ### Proactive warnings
 
