@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"math"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -140,14 +141,32 @@ func Score(now time.Time, req Request, evt event.Event, w Weights) float64 {
 func requestFiles(req Request) []string {
 	out := make([]string, 0, 1+len(req.ChangedFiles))
 	if req.FilePath != "" {
-		out = append(out, req.FilePath)
+		out = append(out, normalizeFilePath(req.FilePath))
 	}
 	for _, f := range req.ChangedFiles {
-		if f != "" {
-			out = append(out, f)
+		if n := normalizeFilePath(f); n != "" {
+			out = append(out, n)
 		}
 	}
 	return out
+}
+
+// normalizeFilePath maps a caller-supplied path onto the repository-
+// relative, slash-separated form used as an entity id (e.g. "e:<path>").
+// It tolerates leading "./" or "/" and OS-native separators so callers
+// that pass "./pkg/f.go" or "\pkg\f.go" still resolve. Returns "" for an
+// empty or root ("." ) path.
+func normalizeFilePath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	p = path.Clean(filepath.ToSlash(p))
+	p = strings.TrimPrefix(p, "/")
+	if p == "." {
+		return ""
+	}
+	return p
 }
 
 // pathForEvent extracts the most useful "path" string for proximity

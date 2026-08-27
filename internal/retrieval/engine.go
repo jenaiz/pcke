@@ -119,8 +119,7 @@ func (e *Engine) Assemble(ctx context.Context, req Request) (*ContextPackage, er
 		return pkg, fmt.Errorf("retrieval: collect candidates: %w", err)
 	}
 	if len(refs) == 0 {
-		pkg.Warnings = append(pkg.Warnings,
-			"graph traversal produced no candidates; the requested files may be unscanned")
+		pkg.Warnings = append(pkg.Warnings, notIndexedWarning(files))
 		return pkg, nil
 	}
 
@@ -129,8 +128,17 @@ func (e *Engine) Assemble(ctx context.Context, req Request) (*ContextPackage, er
 		return pkg, fmt.Errorf("retrieval: score: %w", err)
 	}
 	if len(sections) == 0 {
-		pkg.Warnings = append(pkg.Warnings,
-			"all candidates failed to resolve; the event log may be partially populated")
+		// No candidate resolved. If traversal never grew past the focus
+		// files themselves, the files simply aren't indexed; otherwise the
+		// event log is partially populated (e.g. links point at missing
+		// entities after an interrupted or pre-migration scan).
+		if len(refs) <= len(files) {
+			pkg.Warnings = append(pkg.Warnings, notIndexedWarning(files))
+		} else {
+			pkg.Warnings = append(pkg.Warnings,
+				"all candidates failed to resolve; the event log may be partially populated — "+
+					"run 'pcke scan' to rebuild it (add '--deep' for import relations)")
+		}
 		return pkg, nil
 	}
 
@@ -144,8 +152,29 @@ func (e *Engine) Assemble(ctx context.Context, req Request) (*ContextPackage, er
 	for _, s := range admitted {
 		pkg.TokensUsed += s.Tokens
 	}
+	// Only the focus files' own entities resolved (no graph neighbours):
+	// tell the caller how to get richer context instead of leaving them
+	// guessing why the neighbourhood is empty.
+	if len(refs) <= len(files) {
+		pkg.Warnings = append(pkg.Warnings,
+			"no linked context found; run 'pcke scan --deep' to extract import relations "+
+				"(deep analysis supports Go, Java, JavaScript, and Python)")
+	}
 	pkg.Anticipated = e.anticipate(ctx, files, admitted)
 	return pkg, nil
+}
+
+// notIndexedWarning builds the guidance shown when none of the requested
+// files resolve to an entity — the typical "you never scanned this path"
+// case.
+func notIndexedWarning(files []string) string {
+	if len(files) == 1 {
+		return fmt.Sprintf(
+			"file %q is not in the index — run 'pcke scan' so it is picked up "+
+				"(add '--deep' for import relations)", files[0])
+	}
+	return "none of the requested files are in the index — run 'pcke scan' so they are " +
+		"picked up (add '--deep' for import relations)"
 }
 
 // anticipate returns the refs of the focus files' direct (1-hop)

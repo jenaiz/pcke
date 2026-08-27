@@ -296,6 +296,53 @@ func TestAssemble_UnscannedFileReturnsWarning(t *testing.T) {
 	if len(pkg.Sections) != 0 {
 		t.Errorf("ghost file: got %d sections, want 0", len(pkg.Sections))
 	}
+	if !hasWarningContaining(pkg, "not in the index") || !hasWarningContaining(pkg, "pcke scan") {
+		t.Errorf("want actionable not-indexed warning, got: %v", pkg.Warnings)
+	}
+}
+
+func TestAssemble_NormalizesLeadingDotSlashAndSlash(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"./internal/x.go", "/internal/x.go", "internal/./x.go"} {
+		f := newFixture(t)
+		f.addEntity(t, "internal/x.go", "internal/x.go", "file")
+		eng := retrieval.New(f.db, retrieval.WithClock(func() time.Time { return f.now }))
+		pkg, err := eng.Assemble(context.Background(), retrieval.Request{FilePath: path})
+		if err != nil {
+			t.Fatalf("Assemble(%q): %v", path, err)
+		}
+		if len(pkg.Sections) == 0 {
+			t.Errorf("path %q: got 0 sections, want the entity to resolve", path)
+		}
+	}
+}
+
+func TestAssemble_NoNeighborsAddsDeepHint(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	// Only the focus file's own entity exists; no links to anything.
+	f.addEntity(t, "lonely.go", "lonely.go", "file")
+	eng := retrieval.New(f.db, retrieval.WithClock(func() time.Time { return f.now }))
+	pkg, err := eng.Assemble(context.Background(), retrieval.Request{FilePath: "lonely.go"})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if len(pkg.Sections) == 0 {
+		t.Fatal("want the focus file's own entity as a section")
+	}
+	if !hasWarningContaining(pkg, "no linked context") || !hasWarningContaining(pkg, "--deep") {
+		t.Errorf("want a --deep hint when there are no neighbors, got: %v", pkg.Warnings)
+	}
+}
+
+// hasWarningContaining reports whether any warning contains sub.
+func hasWarningContaining(pkg *retrieval.ContextPackage, sub string) bool {
+	for _, w := range pkg.Warnings {
+		if strings.Contains(w, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAssemble_WeightSumWarning(t *testing.T) {

@@ -186,7 +186,7 @@ cd /path/to/your-project
 | Tool | Description |
 |------|-------------|
 | `recall` | Search the knowledge base for files, modules, and code entities |
-| `get_context_for_file` | Ranked, budget-bounded context subgraph for a single file: 2-hop neighborhood, applicable decisions, linked references |
+| `get_context_for_file` | Ranked, budget-bounded context subgraph for a single file: 2-hop neighborhood, applicable decisions, linked references (run `pcke scan --deep` to populate import relations) |
 | `get_context_for_diff` | Ranked context for the union of subgraphs around changed files (auto-detects git worktree status when none given) |
 | `set_workflow` | Set the active workflow (bugfix / feature / review / refactor / …) for a session; tunes ranker weights and edge priorities |
 | `get_module_context` | Summary of a module: files, dependencies, stability, entities |

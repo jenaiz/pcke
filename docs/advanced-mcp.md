@@ -221,6 +221,13 @@ The response is streamed — one JSON object per ranked section, ending
 in a `{"_summary": true, ...}` item with `tokens_used`, `budget_limit`,
 `truncated`, `warnings`, and `section_count`.
 
+> **Populate the graph first.** The neighborhood comes from import
+> relations, which are only written by `pcke scan --deep`. Deep analysis
+> supports Go, Java, JavaScript, and Python; for other languages a file
+> still resolves to its own entity but has no linked neighbors. If a file
+> isn't in the index at all, the summary `warnings` say so and point you
+> at `pcke scan`.
+
 Parameters:
 
 | Parameter | Description |
