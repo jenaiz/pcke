@@ -221,6 +221,13 @@ The response is streamed — one JSON object per ranked section, ending
 in a `{"_summary": true, ...}` item with `tokens_used`, `budget_limit`,
 `truncated`, `warnings`, and `section_count`.
 
+> **Populate the graph first.** The neighborhood comes from import
+> relations, which are only written by `pcke scan --deep`. Deep analysis
+> supports Go, Java, JavaScript, and Python; for other languages a file
+> still resolves to its own entity but has no linked neighbors. If a file
+> isn't in the index at all, the summary `warnings` say so and point you
+> at `pcke scan`.
+
 Parameters:
 
 | Parameter | Description |
@@ -254,10 +261,10 @@ which paths the engine actually traversed.
 
 Pass the same `session_id` across multiple `get_context_for_file` /
 `get_context_for_diff` calls and the engine treats every ref it has
-already served on that session as `novelty = 0`. The accumulated set
-lives in memory (`internal/retrieval/session`) — restart `pcke serve`
-to clear it. Phase 14 will swap the storage backend for a kdb-backed
-store without changing call sites.
+already served on that session as `novelty = 0`. As of Phase 14 the
+session is kdb-backed (`internal/retrieval/session` → `PersistentSession`
+writing through the observation collector), so the accumulated set
+survives a `pcke serve` restart; inspect it with `pcke sessions show`.
 
 ### Proactive warnings
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/event"
+	"github.com/jenaiz/pcke/internal/kdb/graph"
 )
 
 // newDecisionCmd builds the `pcke decision` subtree:
@@ -37,6 +38,7 @@ Examples:
   pcke decision list
   pcke decision list --source=adr
   pcke decision list --severity=must
+  pcke decision list --file=internal/kdb/db.go
   pcke decision show adr:0008-context-graph-pivot`,
 	}
 	cmd.AddCommand(newDecisionListCmd(), newDecisionShowCmd())
@@ -44,16 +46,17 @@ Examples:
 }
 
 func newDecisionListCmd() *cobra.Command {
-	var sourceFilter, severityFilter string
+	var sourceFilter, severityFilter, fileFilter string
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List decisions",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runDecisionList(sourceFilter, severityFilter)
+			return runDecisionList(sourceFilter, severityFilter, fileFilter)
 		},
 	}
 	cmd.Flags().StringVar(&sourceFilter, "source", "", "Filter by source: adr | annotation | commit | doc | manual")
 	cmd.Flags().StringVar(&severityFilter, "severity", "", "Filter by severity: must | should | may")
+	cmd.Flags().StringVar(&fileFilter, "file", "", "Filter by repository-relative file path linked to the decision")
 	return cmd
 }
 
@@ -68,8 +71,8 @@ func newDecisionShowCmd() *cobra.Command {
 	}
 }
 
-func runDecisionList(sourceFilter, severityFilter string) error {
-	store, closeFn, err := openEventStore()
+func runDecisionList(sourceFilter, severityFilter, fileFilter string) error {
+	db, store, closeFn, err := openEventStoreDB()
 	if err != nil {
 		return err
 	}
@@ -80,6 +83,14 @@ func runDecisionList(sourceFilter, severityFilter string) error {
 		return err
 	}
 	sourceFilter = strings.ToLower(strings.TrimSpace(sourceFilter))
+
+	var allowedDIDs map[string]struct{}
+	if fileFilter = strings.TrimSpace(fileFilter); fileFilter != "" {
+		allowedDIDs, err = decisionsLinkedToFile(db, fileFilter)
+		if err != nil {
+			return err
+		}
+	}
 
 	type row struct {
 		id       string
@@ -101,6 +112,11 @@ func runDecisionList(sourceFilter, severityFilter string) error {
 		}
 		if wantSeverity != 0 && d.Severity != wantSeverity {
 			return nil
+		}
+		if allowedDIDs != nil {
+			if _, ok := allowedDIDs[d.DID]; !ok {
+				return nil
+			}
 		}
 		rows = append(rows, row{
 			id:       d.DID,
@@ -158,15 +174,43 @@ func runDecisionShow(id string) error {
 // returns an event.Store plus a close function. Common to the
 // decision and history subcommands.
 func openEventStore() (*event.Store, func(), error) {
+	_, store, closeFn, err := openEventStoreDB()
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, closeFn, nil
+}
+
+// openEventStoreDB is like openEventStore but also exposes the
+// underlying *kdb.DB for callers that need graph traversal.
+func openEventStoreDB() (*kdb.DB, *event.Store, func(), error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, nil, fmt.Errorf("get working directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("get working directory: %w", err)
 	}
 	db, err := kdb.Open(cwd, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open database: %w", err)
+		return nil, nil, nil, fmt.Errorf("open database: %w", err)
 	}
-	return event.New(db), func() { _ = db.Close() }, nil
+	return db, event.New(db), func() { _ = db.Close() }, nil
+}
+
+// decisionsLinkedToFile returns the set of decision ids (DID) reachable
+// from the file's e: entity via forward decision_link edges.
+func decisionsLinkedToFile(db *kdb.DB, filePath string) (map[string]struct{}, error) {
+	start := graph.Ref("e:" + filePath)
+	refs, err := graph.Neighbors(context.Background(), db, start, graph.TraversalOptions{
+		EdgeTypes: []string{"decision_link"},
+		Direction: graph.Forward,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve decisions for file %q: %w", filePath, err)
+	}
+	dids := make(map[string]struct{}, len(refs))
+	for _, r := range refs {
+		dids[strings.TrimPrefix(string(r), "d:")] = struct{}{}
+	}
+	return dids, nil
 }
 
 func parseSeverityFilter(s string) (event.Severity, error) {

@@ -20,6 +20,7 @@ amend-vs-supersede convention.
 | [0007](0007-prompt-templates-schema.md) | Prompt Templates Schema | Accepted |
 | [0008](0008-context-graph-pivot.md) | Context Graph Pivot | Accepted (amended by 0009) |
 | [0009](0009-durable-memory-corrections.md) | Durable Memory Corrections | Accepted |
+| [0010](0010-retrieval-package-path.md) | Retrieval Package Path (`internal/retrieval`) | Accepted |
 
 ## Note on PRD references
 

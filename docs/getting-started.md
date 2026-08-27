@@ -29,6 +29,12 @@ indexes all files; subsequent scans are incremental.
 
 Use `pcke scan --full` to force a full rescan.
 
+Use `pcke scan --deep` to also extract import relations, which the
+`get_context_for_file` tool traverses to build a file's neighborhood.
+Deep analysis is AST-based and currently supports **Go, Java, JavaScript,
+and Python**; other languages (C/C++, Rust, …) are still indexed as
+file-level entities but produce no import edges.
+
 ## Generate context files
 
 ```bash

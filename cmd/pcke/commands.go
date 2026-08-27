@@ -21,6 +21,7 @@ import (
 	//nolint:staticcheck // SA1019: federation is intentionally retained while frozen; CLI surface is the legitimate caller (PRD v5.2 §2).
 	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/kdb"
+	"github.com/jenaiz/pcke/internal/kdb/event"
 	"github.com/jenaiz/pcke/internal/kdb/index/fts"
 	"github.com/jenaiz/pcke/internal/kdb/migrate"
 	kdbquery "github.com/jenaiz/pcke/internal/kdb/query"
@@ -59,6 +60,12 @@ Examples:
 			db, err := kdb.Open(cwd, nil)
 			if err != nil {
 				return fmt.Errorf("init: create database: %w", err)
+			}
+			// Stamp a fresh database at the current schema version so a
+			// later scan/serve doesn't report a run of no-op migrations.
+			if _, err := applyPendingMigrations(context.Background(), db); err != nil {
+				_ = db.Close()
+				return fmt.Errorf("init: migrate: %w", err)
 			}
 			_ = db.Close()
 
@@ -112,6 +119,14 @@ Examples:
 			}
 			defer func() { _ = db.Close() }()
 
+			// Upgrade a database written by an older pcke before scanning
+			// so legacy kn:/rel:/nt: records become typed-event records.
+			if applied, mErr := applyPendingMigrations(context.Background(), db); mErr != nil {
+				return fmt.Errorf("scan: migrate: %w", mErr)
+			} else if applied > 0 {
+				fmt.Printf("applied %d schema migration(s) before scanning\n", applied)
+			}
+
 			cfg := config.Defaults().Scan
 			var opts []analysis.ScanOption
 			if deep {
@@ -133,6 +148,9 @@ Examples:
 			if deep {
 				fmt.Printf("deep analysis: %d entities, %d relations extracted\n",
 					result.EntitiesExtracted, result.RelationsCreated)
+			} else {
+				fmt.Println("hint: run 'pcke scan --deep' to extract import relations for richer " +
+					"context (deep analysis supports Go, Java, JavaScript, and Python)")
 			}
 			return nil
 		},
@@ -1191,11 +1209,9 @@ Migrations are versioned, chunked (safe for large databases), and idempotent
 			defer func() { _ = db.Close() }()
 
 			ctx := context.Background()
-			engine := migrate.New()
-			registerMigrations(engine)
 
 			before := db.SchemaVersion()
-			applied, err := engine.Run(ctx, db)
+			applied, err := applyPendingMigrations(ctx, db)
 			if err != nil {
 				return fmt.Errorf("migrate: %w", err)
 			}
@@ -1236,6 +1252,45 @@ func registerMigrations(e *migrate.Engine) {
 	// contains/served/belongs_to. Pure version marker; sub-type writers
 	// land in F14.T2.
 	e.Register(migrate.V0015SessionBaseline())
+}
+
+// applyPendingMigrations runs any pending schema migrations on db. It is
+// idempotent and cheap when the schema is current (no pending work =>
+// returns 0). Wired into scan and serve so a database written by an older
+// pcke (legacy kn:/rel:/nt: records, empty typed-event log) is upgraded
+// automatically, without the user having to know about `pcke migrate`.
+// Read-only commands deliberately do not call this.
+func applyPendingMigrations(ctx context.Context, db *kdb.DB) (int, error) {
+	engine := migrate.New()
+	registerMigrations(engine)
+	applied, err := engine.Run(ctx, db)
+	if err != nil {
+		return applied, err
+	}
+	// engine.Run bumps the schema version in memory; a checkpoint forces
+	// the meta page to disk even when the migrations wrote no records
+	// (e.g. an empty database), so the version isn't re-run on next open.
+	if applied > 0 {
+		if cErr := db.Checkpoint(ctx); cErr != nil {
+			return applied, fmt.Errorf("persist schema version: %w", cErr)
+		}
+	}
+	return applied, nil
+}
+
+// errFoundEntity short-circuits the eventLogEmpty scan on the first entity.
+var errFoundEntity = fmt.Errorf("found entity")
+
+// eventLogEmpty reports whether the typed-event log has no Entity records.
+// It stops at the first entity, so the cost is one cursor seek on a
+// populated database. Any scan error is treated as "not empty" to avoid a
+// misleading warning.
+func eventLogEmpty(ctx context.Context, db *kdb.DB) bool {
+	store := event.New(db)
+	err := store.IterateKind(ctx, event.KindEntity, func(event.Event) error {
+		return errFoundEntity
+	})
+	return err == nil
 }
 
 // configGet returns the value of a dotted config key (e.g. "scan.redact_secrets").
@@ -1408,6 +1463,22 @@ Examples:
 				return fmt.Errorf("serve: open database: %w", err)
 			}
 			defer func() { _ = db.Close() }()
+
+			// Upgrade an older database so the typed-event tools have data.
+			// A migration failure is non-fatal: log and serve what we have.
+			if applied, mErr := applyPendingMigrations(context.Background(), db); mErr != nil {
+				fmt.Fprintf(os.Stderr, "pcke serve: migration warning: %v\n", mErr)
+			} else if applied > 0 {
+				fmt.Fprintf(os.Stderr, "pcke serve: applied %d schema migration(s)\n", applied)
+			}
+
+			// Warn (don't block) if the typed-event log is empty: every
+			// context/graph/history tool would return nothing until a scan.
+			if eventLogEmpty(context.Background(), db) {
+				fmt.Fprintln(os.Stderr,
+					"pcke serve: typed-event log is empty — run 'pcke scan' so tools like "+
+						"get_context_for_file return results (use 'pcke scan --deep' for import relations)")
+			}
 
 			// Phase 14 F14.T6 — run the retention prune in the background
 			// on startup. Failures are logged but do not block serving.

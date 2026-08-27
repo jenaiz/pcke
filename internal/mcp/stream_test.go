@@ -516,6 +516,7 @@ func TestSuggestContext_Enabled_ModuleFound(t *testing.T) {
 	}
 	if pc == nil {
 		t.Fatal("expected proactive context for internal/kdb")
+		return
 	}
 	if pc.Module != "internal/kdb" {
 		t.Errorf("expected module 'internal/kdb', got %q", pc.Module)
@@ -593,6 +594,7 @@ func TestSuggestContext_DecisionWarnings(t *testing.T) {
 	}
 	if pc == nil {
 		t.Fatal("expected proactive context")
+		return
 	}
 	if len(pc.Warnings) != 1 {
 		t.Fatalf("warnings = %v, want exactly 1 (must-severity only)", pc.Warnings)
@@ -617,6 +619,7 @@ func TestSuggestContext_NoTypedEventsIsEmpty(t *testing.T) {
 	}
 	if pc == nil {
 		t.Fatal("expected proactive context for matched module")
+		return
 	}
 	if len(pc.Warnings) != 0 {
 		t.Errorf("legacy KB warnings = %v, want empty", pc.Warnings)

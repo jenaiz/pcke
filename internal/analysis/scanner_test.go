@@ -57,6 +57,86 @@ func TestScannerFullScan(t *testing.T) {
 	}
 }
 
+// TestScannerIncrementalTracksChanges verifies that a second scan sees the
+// nodes written by the first (loadExistingNodes cursor scan), so unchanged
+// files are skipped, edits count as updates, and removals are marked
+// deleted — the incremental machinery is dead if existing nodes don't load.
+func TestScannerIncrementalTracksChanges(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	writeRepoFile(t, dir, "a.go", "package main\n")
+	writeRepoFile(t, dir, "b.go", "package main\n")
+	gitAdd(t, dir, "a.go")
+	gitAdd(t, dir, "b.go")
+
+	dbDir := t.TempDir()
+	db, err := kdb.Open(dbDir, nil)
+	if err != nil {
+		t.Fatalf("kdb.Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	cfg := config.Defaults().Scan
+	scanner, err := NewScanner(dir, db, cfg)
+	if err != nil {
+		t.Fatalf("NewScanner: %v", err)
+	}
+	ctx := context.Background()
+
+	// First incremental scan: a.go and b.go are new.
+	r1, err := scanner.Scan(ctx, false)
+	if err != nil {
+		t.Fatalf("Scan #1: %v", err)
+	}
+	if r1.NodesCreated < 2 {
+		t.Fatalf("first scan NodesCreated = %d, want >= 2", r1.NodesCreated)
+	}
+
+	// Second scan, nothing changed: existing nodes must load, so no file
+	// is re-created or updated.
+	r2, err := scanner.Scan(ctx, false)
+	if err != nil {
+		t.Fatalf("Scan #2: %v", err)
+	}
+	if r2.NodesCreated != 0 || r2.NodesUpdated != 0 {
+		t.Errorf("re-scan created=%d updated=%d, want 0/0 (loadExistingNodes must see prior nodes)",
+			r2.NodesCreated, r2.NodesUpdated)
+	}
+
+	// Edit a.go: it must count as an update, not a create.
+	writeRepoFile(t, dir, "a.go", "package main\n\nvar X = 1\n")
+	gitAdd(t, dir, "a.go")
+	r3, err := scanner.Scan(ctx, false)
+	if err != nil {
+		t.Fatalf("Scan #3: %v", err)
+	}
+	if r3.NodesUpdated < 1 {
+		t.Errorf("after edit NodesUpdated = %d, want >= 1", r3.NodesUpdated)
+	}
+	if r3.NodesCreated != 0 {
+		t.Errorf("after edit NodesCreated = %d, want 0", r3.NodesCreated)
+	}
+
+	// Remove b.go: it must be marked deleted.
+	run(t, dir, "git", "rm", "-q", "b.go")
+	run(t, dir, "git", "commit", "-m", "rm b.go")
+	r4, err := scanner.Scan(ctx, false)
+	if err != nil {
+		t.Fatalf("Scan #4: %v", err)
+	}
+	if r4.NodesDeleted < 1 {
+		t.Errorf("after removal NodesDeleted = %d, want >= 1", r4.NodesDeleted)
+	}
+}
+
+// writeRepoFile writes filename (relative to dir) with content.
+func writeRepoFile(t *testing.T, dir, filename, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", filename, err)
+	}
+}
+
 func TestScannerSecretFilesExcluded(t *testing.T) {
 	root := findRepoRoot(t)
 

@@ -41,6 +41,7 @@ func TestParse_Traverse_FullArgs(t *testing.T) {
 	tx := q.Where.Traverse
 	if tx == nil {
 		t.Fatal("Traverse is nil")
+		return
 	}
 	if tx.Depth != 3 {
 		t.Errorf("Depth = %d, want 3", tx.Depth)

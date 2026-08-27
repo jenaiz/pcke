@@ -1,6 +1,7 @@
 package analysis // scanner.go — file tree scanner and orchestrator.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -771,9 +772,24 @@ func (s *Scanner) enrichWithGit(node *KnowledgeNode, relPath string) {
 // loadExistingNodes reads all knowledge nodes from the database.
 func (s *Scanner) loadExistingNodes(ctx context.Context) (map[string]KnowledgeNode, error) {
 	nodes := map[string]KnowledgeNode{}
-	if err := s.db.View(ctx, func(_ *tx.ReadTx) error {
-		// We don't have cursor-based prefix scan on ReadTx yet.
-		// For Phase 0, we'll load nodes during scan by probing known paths.
+	prefix := []byte(prefixNode)
+	if err := s.db.View(ctx, func(rtx *tx.ReadTx) error {
+		cursor := rtx.Cursor()
+		if !cursor.Seek(prefix) {
+			return nil
+		}
+		for cursor.Valid() {
+			key := cursor.Key()
+			if !bytes.HasPrefix(key, prefix) {
+				break
+			}
+			var node KnowledgeNode
+			if err := json.Unmarshal(cursor.Value(), &node); err != nil {
+				return fmt.Errorf("unmarshal node %q: %w", key, err)
+			}
+			nodes[node.ID] = node
+			cursor.Next()
+		}
 		return nil
 	}); err != nil {
 		return nil, err

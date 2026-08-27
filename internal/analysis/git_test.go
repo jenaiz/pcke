@@ -3,7 +3,12 @@ package analysis
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/jenaiz/pcke/internal/kdb"
 	"github.com/jenaiz/pcke/internal/kdb/tx"
@@ -29,26 +34,60 @@ func TestGitIntelHeadHash(t *testing.T) {
 }
 
 func TestGitIntelFileHistory(t *testing.T) {
-	root := findRepoRoot(t)
+	// Build a throwaway repo with a commit authored *now* so the test
+	// exercises FileHistory deterministically and never ages out of the
+	// historyWindowDays lookback window (a real repo file can go quiet
+	// for >90 days and legitimately report zero recent commits).
+	dir := initTempRepo(t, "app.go", "feat: add app\n\nfirst version")
 
-	gi, err := NewGitIntel(root)
+	gi, err := NewGitIntel(dir)
 	if err != nil {
 		t.Fatalf("NewGitIntel: %v", err)
 	}
 
-	// go.mod should have some history.
-	stats, err := gi.FileHistory("go.mod")
+	stats, err := gi.FileHistory("app.go")
 	if err != nil {
-		t.Fatalf("FileHistory(go.mod): %v", err)
+		t.Fatalf("FileHistory(app.go): %v", err)
 	}
-	if stats.TotalCommits == 0 {
-		t.Error("expected at least 1 commit for go.mod")
+	if stats.TotalCommits < 1 {
+		t.Errorf("TotalCommits = %d, want >= 1", stats.TotalCommits)
 	}
 	if stats.Stability < 0 || stats.Stability > 1 {
 		t.Errorf("stability = %f, want [0,1]", stats.Stability)
 	}
-	t.Logf("go.mod: %d commits, stability=%.2f, last_author=%s, change_type=%s",
+	if stats.LastChangeType != "feat" {
+		t.Errorf("LastChangeType = %q, want %q", stats.LastChangeType, "feat")
+	}
+	t.Logf("app.go: %d commits, stability=%.2f, last_author=%s, change_type=%s",
 		stats.TotalCommits, stats.Stability, stats.LastAuthor, stats.LastChangeType)
+}
+
+// initTempRepo creates a git repository in a temp dir, writes filename
+// with content, and commits it authored at the current time. It returns
+// the repository directory.
+func initTempRepo(t *testing.T, filename, commitMsg string) string {
+	t.Helper()
+	dir := t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("PlainInit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte("package main\n"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", filename, err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	if _, err := wt.Add(filename); err != nil {
+		t.Fatalf("Add %s: %v", filename, err)
+	}
+	if _, err := wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	return dir
 }
 
 func TestParseChangeType(t *testing.T) {
