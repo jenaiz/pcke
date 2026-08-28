@@ -96,18 +96,24 @@ func (s *Server) makePromptHandler(def templateDef) func(context.Context, mcplib
 		if err != nil {
 			return nil, fmt.Errorf("mcp: template %s: load nodes: %w", def.name, err)
 		}
+		decisions, err := output.LoadDecisions(ctx, s.db)
+		if err != nil {
+			return nil, fmt.Errorf("mcp: template %s: load decisions: %w", def.name, err)
+		}
 
 		module := req.Params.Arguments["module"]
 
 		// If a module filter is active, narrow nodes to that module.
 		filtered := nodes
+		filteredDecisions := decisions
 		if module != "" {
 			filtered = filterNodesByModule(nodes, module)
+			filteredDecisions = output.FilterDecisionsByModule(decisions, module)
 		}
 
 		var parts []string
 		for _, section := range def.sections {
-			rendered := renderSection(section, filtered)
+			rendered := renderSection(section, filtered, filteredDecisions)
 			if rendered != "" {
 				parts = append(parts, rendered)
 			}
@@ -134,7 +140,7 @@ func (s *Server) makePromptHandler(def templateDef) func(context.Context, mcplib
 }
 
 // renderSection renders a named context section using the output renderers.
-func renderSection(section string, nodes []analysis.KnowledgeNode) string {
+func renderSection(section string, nodes []analysis.KnowledgeNode, decisions []output.DecisionInfo) string {
 	switch section {
 	case "architecture":
 		return output.RenderArchitecture(nodes)
@@ -143,7 +149,7 @@ func renderSection(section string, nodes []analysis.KnowledgeNode) string {
 	case "constraints":
 		return output.RenderConstraints(nodes)
 	case "decisions":
-		return output.RenderDecisions(nodes)
+		return output.RenderDecisions(decisions)
 	case "history":
 		return output.RenderHistory(nodes)
 	default:

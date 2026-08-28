@@ -55,6 +55,11 @@ func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
 		return nil, fmt.Errorf("output: compute topology: %w", err)
 	}
 
+	decisions, err := LoadDecisions(ctx, r.db)
+	if err != nil {
+		return nil, fmt.Errorf("output: load decisions: %w", err)
+	}
+
 	result := &SyncResult{}
 
 	generators := []struct {
@@ -64,7 +69,6 @@ func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
 		{".context/ARCHITECTURE.md", RenderArchitecture},
 		{".context/CONVENTIONS.md", RenderConventions},
 		{".context/HISTORY.md", RenderHistory},
-		{".context/DECISIONS.md", RenderDecisions},
 		{".context/CONSTRAINTS.md", RenderConstraints},
 	}
 
@@ -75,6 +79,11 @@ func (r *Renderer) Sync(ctx context.Context) (*SyncResult, error) {
 		}
 		result.FilesWritten++
 	}
+
+	if err := r.writeFile(".context/DECISIONS.md", RenderDecisions(decisions)); err != nil {
+		return nil, fmt.Errorf("output: write .context/DECISIONS.md: %w", err)
+	}
+	result.FilesWritten++
 
 	// Per-module pages.
 	modules := groupByModule(nodes)

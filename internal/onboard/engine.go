@@ -35,6 +35,7 @@ type Engine struct {
 	Nodes     []analysis.KnowledgeNode
 	Relations []analysis.Relation
 	EvolLogs  []analysis.EvolutionLog
+	Decisions []output.DecisionInfo
 	RepoPath  string
 	Config    *Config
 }
@@ -77,7 +78,7 @@ func (e *Engine) Generate(_ context.Context) (*Walkthrough, error) {
 		{"key_modules", "Key Modules", func() string { return e.renderKeyModules(modules, scores, cfg) }},
 		{"conventions", "Conventions", func() string { return output.RenderConventions(e.Nodes) }},
 		{"constraints", "Constraints", func() string { return output.RenderConstraints(e.Nodes) }},
-		{"decisions", "Open Decisions", func() string { return output.RenderDecisions(e.Nodes) }},
+		{"decisions", "Open Decisions", func() string { return output.RenderDecisions(e.Decisions) }},
 	}
 
 	skipSet := make(map[string]bool, len(cfg.Walkthrough.SkipSections))
@@ -140,6 +141,7 @@ func (e *Engine) GenerateForModule(_ context.Context, module string) (*Walkthrou
 		Nodes:     filtered,
 		Relations: e.Relations,
 		EvolLogs:  e.EvolLogs,
+		Decisions: output.FilterDecisionsByModule(e.Decisions, module),
 		RepoPath:  e.RepoPath,
 		Config:    e.Config,
 	}

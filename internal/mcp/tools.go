@@ -12,6 +12,7 @@ import (
 	//nolint:staticcheck // SA1019: federation is intentionally retained while frozen; MCP surface keeps the existing tools wired (PRD v5.2 §2).
 	"github.com/jenaiz/pcke/internal/federation"
 	"github.com/jenaiz/pcke/internal/onboard"
+	"github.com/jenaiz/pcke/internal/output"
 	"github.com/jenaiz/pcke/internal/retrieval"
 	"github.com/jenaiz/pcke/internal/retrieval/session"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -579,6 +580,11 @@ func (s *Server) buildOnboarding(ctx context.Context, request mcplib.CallToolReq
 		return nil, fmt.Errorf("load evolution logs: %w", err)
 	}
 
+	decisions, err := output.LoadDecisions(ctx, s.db)
+	if err != nil {
+		return nil, fmt.Errorf("load decisions: %w", err)
+	}
+
 	cfg, err := onboard.LoadConfig(s.root)
 	if err != nil {
 		cfg = onboard.DefaultConfig()
@@ -588,6 +594,7 @@ func (s *Server) buildOnboarding(ctx context.Context, request mcplib.CallToolReq
 		Nodes:     nodes,
 		Relations: rels,
 		EvolLogs:  logs,
+		Decisions: decisions,
 		RepoPath:  s.root,
 		Config:    cfg,
 	}
