@@ -85,6 +85,10 @@ bench-compare: ## Compare benchmarks against baseline (reject > 10% regression)
 	$(GO) test -run=^$$ -bench=BenchmarkCritical -benchmem -count=5 $(PKG) > bench-new.txt
 	benchstat bench-baseline.txt bench-new.txt
 
+.PHONY: acceptance-demo
+acceptance-demo: ## Run the v1.0.0 acceptance demo (PRD v5.2 §8) against this repo
+	bash scripts/acceptance-demo.sh
+
 # ---------------------------------------------------------------------------
 # Lint / Format
 # ---------------------------------------------------------------------------

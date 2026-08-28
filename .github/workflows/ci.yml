@@ -78,6 +78,46 @@ jobs:
       - name: test -race
         run: go test -race -count=1 ./...
 
+  test-debug:
+    name: test (kdbdebug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # git-history tests (DetectRenames) walk parent commits
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: test -tags=kdbdebug
+        run: go test -tags=kdbdebug -count=1 ./...
+
+  rerank-smoke:
+    name: build (-tags=rerank)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: build -tags=rerank
+        run: go build -tags=rerank ./...
+
+  acceptance-demo:
+    name: acceptance demo (PRD v5.2 §8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # demo clones the repo and runs decision backfill over history
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: run acceptance demo
+        run: make acceptance-demo
+
   fuzz-short:
     name: fuzz (5 min)
     runs-on: ubuntu-latest
