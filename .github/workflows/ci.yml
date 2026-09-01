@@ -78,6 +78,46 @@ jobs:
       - name: test -race
         run: go test -race -count=1 ./...
 
+  test-debug:
+    name: test (kdbdebug)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # git-history tests (DetectRenames) walk parent commits
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: test -tags=kdbdebug
+        run: go test -tags=kdbdebug -count=1 ./...
+
+  rerank-smoke:
+    name: build (-tags=rerank)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: build -tags=rerank
+        run: go build -tags=rerank ./...
+
+  acceptance-demo:
+    name: acceptance demo (PRD v5.2 §8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # demo clones the repo and runs decision backfill over history
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: run acceptance demo
+        run: make acceptance-demo
+
   fuzz-short:
     name: fuzz (5 min)
     runs-on: ubuntu-latest
@@ -103,11 +143,42 @@ jobs:
           make fuzz FUZZTIME=$FUZZTIME
 
   bench-gate:
-    name: bench-gate (>=10% regression on BenchmarkCritical*)
+    name: bench (informational)
+    # Informational only: shared GitHub runners have high benchmark variance,
+    # so this reports base-vs-head deltas to the job summary but never blocks.
+    # A hard >10% gate needs a dedicated runner (tracked as follow-up).
+    # Scoped to the query micro-benchmarks; the graph BenchmarkCritical*
+    # fixture (~1000 db.Grow calls) is too slow for a per-PR job.
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
     runs-on: ubuntu-latest
-    if: false # Activated in Phase 1 once benchmarks exist (Plan §7.4).
     steps:
-      - run: echo "bench-gate disabled until Phase 1"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need the PR base commit to benchmark against
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: install benchstat
+        run: |
+          go install golang.org/x/perf/cmd/benchstat@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: benchmark head vs base
+        env:
+          BENCH_PKG: ./internal/query/...
+          BENCH_ARGS: -run=^$ -bench=BenchmarkCritical -benchmem -benchtime=100ms -count=6
+        run: |
+          set -euo pipefail
+          go test $BENCH_ARGS "$BENCH_PKG" | tee /tmp/head.txt
+          git checkout --quiet --detach "${{ github.event.pull_request.base.sha }}"
+          go test $BENCH_ARGS "$BENCH_PKG" | tee /tmp/base.txt
+          {
+            echo '### Benchmark: base vs head (informational)'
+            echo '```'
+            benchstat /tmp/base.txt /tmp/head.txt || echo "benchstat failed (non-blocking)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     name: build (${{ matrix.os }}/${{ matrix.goarch }})
