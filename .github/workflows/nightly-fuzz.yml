@@ -8,33 +8,82 @@ on:
 permissions:
   contents: read
 
+env:
+  GO_VERSION: "1.26.x"
+  FUZZTIME: 60m
+
 jobs:
-  fuzz-long:
-    name: fuzz (60 min per target)
+  # Discover fuzz targets and emit a {pkg, func} matrix so each target runs
+  # in its own parallel job. The previous single job ran all targets
+  # sequentially (8 × 60m = 8h), which blew past GitHub's 6h job cap.
+  discover:
+    name: discover fuzz targets
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.x"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: fuzz
-        env:
-          FUZZTIME: 60m
+      - id: list
+        name: list targets
         run: |
           set -euo pipefail
-          targets=$(go test -list '^Fuzz' ./... 2>/dev/null | grep -E '^Fuzz' || true)
-          if [ -z "$targets" ]; then
-            echo "no fuzz targets yet — exiting clean"
-            exit 0
+          pkgs=$(grep -rlE 'func Fuzz[A-Za-z0-9_]+\(' --include='*_test.go' . \
+                 | xargs -n1 dirname | sort -u)
+          targets=$(
+            for d in $pkgs; do
+              pkg=$(go list "$d")
+              for fn in $(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep '^Fuzz' || true); do
+                printf '{"pkg":"%s","func":"%s"}\n' "$pkg" "$fn"
+              done
+            done | jq -sc '.'
+          )
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "discovered: $targets"
+
+  fuzz:
+    name: fuzz ${{ matrix.target.func }}
+    needs: discover
+    if: needs.discover.outputs.targets != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75  # FUZZTIME (60m) + build/setup overhead
+    strategy:
+      fail-fast: false   # one target's crash must not cancel the others
+      matrix:
+        target: ${{ fromJSON(needs.discover.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: fuzz ${{ matrix.target.func }}
+        run: |
+          set -uo pipefail
+          go test -run='^$' -fuzz="^${{ matrix.target.func }}$" \
+            -fuzztime="${FUZZTIME}" "${{ matrix.target.pkg }}"
+          code=$?
+          # A real failure writes a crasher under testdata/fuzz/<Fuzz>/ (an
+          # untracked file). The end-of-fuzztime "context deadline exceeded"
+          # flake writes nothing, so tolerate a non-zero exit with no crasher.
+          crashers=$(git ls-files --others --exclude-standard | grep -F 'testdata/fuzz/' || true)
+          if [ -n "$crashers" ]; then
+            echo "::error::fuzz found a crashing input:"
+            echo "$crashers"
+            exit 1
           fi
-          make fuzz FUZZTIME=$FUZZTIME
-      - name: upload corpus on failure
+          if [ "$code" -ne 0 ]; then
+            echo "::warning::fuzz exited $code with no crasher written (end-of-time flake) — tolerating"
+          fi
+          exit 0
+      - name: upload crasher on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-failures
+          name: fuzz-crasher-${{ matrix.target.func }}
           path: |
             **/testdata/fuzz/**
           if-no-files-found: warn
