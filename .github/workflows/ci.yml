@@ -39,9 +39,9 @@ jobs:
           - os: ubuntu-22.04-arm
             arch: arm64
             runner: ubuntu-22.04-arm
-          - os: macos-14
+          - os: macos-latest
             arch: arm64
-            runner: macos-14
+            runner: macos-latest
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -189,7 +189,7 @@ jobs:
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
-          - os: macos-14
+          - os: macos-latest
             goos: darwin
             goarch: arm64
           - os: windows-latest
