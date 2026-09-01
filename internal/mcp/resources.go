@@ -80,15 +80,15 @@ func (s *Server) handleDecisionsResource(
 	ctx context.Context,
 	_ mcplib.ReadResourceRequest,
 ) ([]mcplib.ResourceContents, error) {
-	nodes, err := s.loadNodes(ctx)
+	decisions, err := output.LoadDecisions(ctx, s.db)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: load nodes: %w", err)
+		return nil, fmt.Errorf("mcp: load decisions: %w", err)
 	}
 	return []mcplib.ResourceContents{
 		mcplib.TextResourceContents{
 			URI:      "pcke://decisions",
 			MIMEType: "text/markdown",
-			Text:     output.RenderDecisions(nodes),
+			Text:     output.RenderDecisions(decisions),
 		},
 	}, nil
 }

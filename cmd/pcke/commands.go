@@ -2005,6 +2005,11 @@ func runOnboard(format, module, depth, outputFile string) error {
 		return fmt.Errorf("onboard: load evolution logs: %w", err)
 	}
 
+	decisions, err := output.LoadDecisions(ctx, db)
+	if err != nil {
+		return fmt.Errorf("onboard: load decisions: %w", err)
+	}
+
 	cfg, err := onboard.LoadConfig(cwd)
 	if err != nil {
 		return fmt.Errorf("onboard: load config: %w", err)
@@ -2014,6 +2019,7 @@ func runOnboard(format, module, depth, outputFile string) error {
 		Nodes:     nodes,
 		Relations: rels,
 		EvolLogs:  logs,
+		Decisions: decisions,
 		RepoPath:  cwd,
 		Config:    cfg,
 	}

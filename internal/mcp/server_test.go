@@ -365,6 +365,20 @@ func TestConstraintsResource(t *testing.T) {
 func TestDecisionsResource(t *testing.T) {
 	db := seedDB(t)
 	defer func() { _ = db.Close() }()
+	if err := db.Grow(); err != nil {
+		t.Fatalf("db.Grow: %v", err)
+	}
+
+	if _, err := event.New(db).Append(context.Background(), &event.Decision{
+		Hdr:      event.Header{CreatedAt: time.Now().UTC()},
+		DID:      "adr:0001-readme",
+		Title:    "Keep README in sync",
+		Severity: event.SeverityMust,
+		Scope:    event.ScopeGlobal,
+		Source:   "adr",
+	}); err != nil {
+		t.Fatalf("seed decision: %v", err)
+	}
 
 	ts := startTestServer(t, db)
 	text := readResource(t, ts, "pcke://decisions")
@@ -372,8 +386,8 @@ func TestDecisionsResource(t *testing.T) {
 	if !strings.Contains(text, "# Decisions") {
 		t.Errorf("expected decisions header, got:\n%s", truncate(text, 200))
 	}
-	if !strings.Contains(text, "README.md") {
-		t.Errorf("expected README.md in decisions, got:\n%s", text)
+	if !strings.Contains(text, "Keep README in sync") {
+		t.Errorf("expected seeded decision in decisions, got:\n%s", text)
 	}
 }
 

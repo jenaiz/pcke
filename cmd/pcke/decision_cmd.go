@@ -104,7 +104,7 @@ func runDecisionList(sourceFilter, severityFilter, fileFilter string) error {
 		if !ok {
 			return nil
 		}
-		if d.Header().Lifecycle == event.LifecycleSuperseded {
+		if d.Header().Lifecycle != event.LifecycleActive {
 			return nil
 		}
 		if sourceFilter != "" && strings.ToLower(d.Source) != sourceFilter {
